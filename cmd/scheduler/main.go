@@ -44,13 +44,12 @@ func run() error {
 	}
 
 	_, err = scheduler.Run(context.Background(), scheduler.Config{
-		Queue:          jobQueue,
-		Dispatcher:     workflowDispatcher,
-		MaxJobs:        options.maxJobs,
-		Workflow:       options.workflow,
-		SchedulerRunID: options.schedulerRunID,
-		DryRun:         options.dryRun,
-		Output:         os.Stdout,
+		Queue:      jobQueue,
+		Dispatcher: workflowDispatcher,
+		MaxJobs:    options.maxJobs,
+		Workflow:   options.workflow,
+		DryRun:     options.dryRun,
+		Output:     os.Stdout,
 	})
 	return err
 }
@@ -62,7 +61,6 @@ type options struct {
 	githubToken            string
 	repository             string
 	ref                    string
-	schedulerRunID         string
 	workflow               string
 	buildbucketURL         string
 	buildbucketProject     string
@@ -88,7 +86,6 @@ func parseOptions(args []string) (options, error) {
 	flags.StringVar(&parsedOptions.githubToken, "github-token", parsedOptions.githubToken, "GitHub token used to dispatch builder workflows")
 	flags.StringVar(&parsedOptions.repository, "repository", parsedOptions.repository, "repository in owner/name format")
 	flags.StringVar(&parsedOptions.ref, "ref", parsedOptions.ref, "git ref used for builder workflow dispatches")
-	flags.StringVar(&parsedOptions.schedulerRunID, "scheduler-run-id", parsedOptions.schedulerRunID, "GitHub run ID of the scheduler workflow")
 	flags.Var(optionalString{value: &parsedOptions.workflow}, "workflow", "GitHub Actions workflow file or ID to dispatch")
 	flags.StringVar(&parsedOptions.buildbucketURL, "buildbucket-url", parsedOptions.buildbucketURL, "Buildbucket base URL")
 	flags.StringVar(&parsedOptions.buildbucketProject, "buildbucket-project", parsedOptions.buildbucketProject, "LUCI project to query")

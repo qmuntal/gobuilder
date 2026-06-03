@@ -46,7 +46,6 @@ jobs:
           --github-token "${{ github.token }}"
           --repository "${{ github.repository }}"
           --ref "${{ github.ref_name }}"
-          --scheduler-run-id "${{ github.run_id }}"
           --workflow "builder.yml"
           --buildbucket-builder-name "${{ inputs.builder_name }}"
           --max-jobs "${{ inputs.max_jobs }}"

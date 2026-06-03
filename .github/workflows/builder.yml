@@ -9,9 +9,6 @@ on:
       queue_depth:
         description: Queue depth observed by scheduler
         required: false
-      scheduler_run_id:
-        description: Scheduler run that started this builder
-        required: false
 
 permissions: {}
 

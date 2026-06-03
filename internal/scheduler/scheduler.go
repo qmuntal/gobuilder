@@ -19,13 +19,12 @@ type WorkflowDispatcher interface {
 }
 
 type Config struct {
-	Queue          JobQueue
-	Dispatcher     WorkflowDispatcher
-	MaxJobs        int
-	Workflow       string
-	SchedulerRunID string
-	DryRun         bool
-	Output         io.Writer
+	Queue      JobQueue
+	Dispatcher WorkflowDispatcher
+	MaxJobs    int
+	Workflow   string
+	DryRun     bool
+	Output     io.Writer
 }
 
 type Result struct {
@@ -80,9 +79,6 @@ func Run(ctx context.Context, config Config) (Result, error) {
 				"job_index":   strconv.Itoa(jobIndex),
 				"queue_depth": strconv.Itoa(queueDepth),
 			},
-		}
-		if config.SchedulerRunID != "" {
-			dispatchRequest.Inputs["scheduler_run_id"] = config.SchedulerRunID
 		}
 
 		waitGroup.Go(func() {

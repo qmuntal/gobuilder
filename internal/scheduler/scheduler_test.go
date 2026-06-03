@@ -62,12 +62,11 @@ func TestRunCapsDispatchesAtMaximum(testingContext *testing.T) {
 	dispatcher := &recordingDispatcher{}
 
 	result, err := Run(context.Background(), Config{
-		Queue:          fakeJobQueue{jobs: 5},
-		Dispatcher:     dispatcher,
-		MaxJobs:        2,
-		Workflow:       "builder.yml",
-		SchedulerRunID: "12345",
-		Output:         output,
+		Queue:      fakeJobQueue{jobs: 5},
+		Dispatcher: dispatcher,
+		MaxJobs:    2,
+		Workflow:   "builder.yml",
+		Output:     output,
 	})
 	if err != nil {
 		testingContext.Fatalf("Run() error = %v", err)
@@ -87,9 +86,6 @@ func TestRunCapsDispatchesAtMaximum(testingContext *testing.T) {
 	})
 	if requests[1].Inputs["job_index"] != "2" {
 		testingContext.Fatalf("second job_index = %q, want 2", requests[1].Inputs["job_index"])
-	}
-	if requests[0].Inputs["scheduler_run_id"] != "12345" {
-		testingContext.Fatalf("scheduler_run_id = %q, want 12345", requests[0].Inputs["scheduler_run_id"])
 	}
 }
 
