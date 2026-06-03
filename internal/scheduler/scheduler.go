@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"sync"
 
 	"github.com/qmuntal/gobuilder/internal/githubactions"
 )
@@ -64,7 +65,15 @@ func Run(ctx context.Context, config Config) (Result, error) {
 		return result, fmt.Errorf("workflow dispatcher is required")
 	}
 
+	type dispatchResult struct {
+		jobIndex int
+		err      error
+	}
+
+	dispatchResults := make(chan dispatchResult, dispatchCount)
+	var waitGroup sync.WaitGroup
 	for jobIndex := 1; jobIndex <= dispatchCount; jobIndex++ {
+		jobIndex := jobIndex
 		dispatchRequest := githubactions.DispatchRequest{
 			Workflow: config.Workflow,
 			Inputs: map[string]string{
@@ -76,12 +85,32 @@ func Run(ctx context.Context, config Config) (Result, error) {
 			dispatchRequest.Inputs["scheduler_run_id"] = config.SchedulerRunID
 		}
 
-		if err := config.Dispatcher.DispatchWorkflow(ctx, dispatchRequest); err != nil {
-			return result, fmt.Errorf("dispatch builder workflow for job %d: %w", jobIndex, err)
+		waitGroup.Go(func() {
+			dispatchResults <- dispatchResult{
+				jobIndex: jobIndex,
+				err:      config.Dispatcher.DispatchWorkflow(ctx, dispatchRequest),
+			}
+		})
+	}
+
+	waitGroup.Wait()
+	close(dispatchResults)
+
+	var dispatchError error
+	for dispatchResult := range dispatchResults {
+		if dispatchResult.err != nil {
+			if dispatchError == nil {
+				dispatchError = fmt.Errorf("dispatch builder workflow for job %d: %w", dispatchResult.jobIndex, dispatchResult.err)
+			}
+			continue
 		}
 
 		result.Dispatched++
-		writeStatus(config.Output, "dispatched job_index=%d\n", jobIndex)
+		writeStatus(config.Output, "dispatched job_index=%d\n", dispatchResult.jobIndex)
+	}
+
+	if dispatchError != nil {
+		return result, dispatchError
 	}
 
 	return result, nil
