@@ -11,6 +11,7 @@ on:
       builder_name:
         description: Only count queued LUCI builders whose name contains this value
         required: false
+        default: windows-arm64
 
 permissions:
   actions: write

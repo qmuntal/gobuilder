@@ -21,7 +21,7 @@ The scheduler counts queued Go LUCI builds by querying Buildbucket, the backend 
 
 The `builder` workflow follows the Go dashboard builder setup by minting a LUCI machine token with `luci_machine_tokend` and starting the Swarming bot with `bootstrapswarm`. Before it can work, the builder must be approved and defined by the Go team in LUCI.
 
-The `builder` workflow runs on a Windows ARM64 runner. `luci_machine_tokend` is installed from CIPD as `infra/tools/luci_machine_tokend/windows-arm64`. The Azure Windows ARM64 setup in `golang/build` downloads `bootstrapswarm.exe` from `go-builder-data`; this workflow does the same because there does not appear to be a public CIPD package for `bootstrapswarm`.
+The `builder` workflow runs on a Windows ARM64 runner. It downloads `luci_machine_tokend.exe` and `bootstrapswarm.exe` from `go-builder-data`, matching the Azure Windows ARM64 setup in `golang/build`. The Swarming bot handles CIPD-managed payloads after it starts.
 
 Required repository variables:
 

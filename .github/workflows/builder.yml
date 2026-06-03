@@ -12,18 +12,11 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - name: Install CIPD
-        run: |
-          $cipdRoot = Join-Path $env:RUNNER_TEMP "cipd-bin"
-          New-Item -ItemType Directory -Force -Path $cipdRoot | Out-Null
-          curl.exe -sSL -o (Join-Path $cipdRoot "cipd.exe") "https://chrome-infra-packages.appspot.com/client?platform=windows-arm64&version=latest"
-          Add-Content -Path $env:GITHUB_PATH -Value $cipdRoot
-
       - name: Install LUCI builder tools
         run: |
           $toolRoot = Join-Path $env:RUNNER_TEMP "luci-tools"
           New-Item -ItemType Directory -Force -Path $toolRoot | Out-Null
-          cipd install infra/tools/luci_machine_tokend/windows-arm64 latest -root $toolRoot
+          curl.exe -sSL -o (Join-Path $toolRoot "luci_machine_tokend.exe") "https://storage.googleapis.com/go-builder-data/windows-arm64-luci_machine_tokend.exe"
           curl.exe -sSL -o (Join-Path $toolRoot "bootstrapswarm.exe") "https://storage.googleapis.com/go-builder-data/windows-arm64-bootstrapswarm.exe"
           Add-Content -Path $env:GITHUB_PATH -Value $toolRoot
 
