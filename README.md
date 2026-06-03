@@ -9,7 +9,9 @@ This repository has two workflows:
 
 The `builder` workflow declares `permissions: {}` so the default `GITHUB_TOKEN` has no repository permissions. The `scheduler` workflow grants `contents: read` to check out the Go source and `actions: write` to dispatch `builder` in the same repository with the built-in token.
 
-The scheduler uses a fixed queue that returns `2` queued jobs by default. Configure it with workflow inputs, repository variables, or command flags:
+The scheduler counts queued Go LUCI builds by querying Buildbucket, the backend used by https://ci.chromium.org/ui/p/golang. It counts `SCHEDULED` builds in the `golang/ci` builder bucket, then starts up to the configured maximum number of `builder` workflow runs.
 
-- `--fixed-jobs`: queue depth returned by the fixed queue, default `2`
 - `--max-jobs`: maximum builder runs started per scheduler run, default `5`
+- `--buildbucket-project`: LUCI project to query, default `golang`
+- `--buildbucket-bucket`: LUCI bucket to query, default `ci`
+- `--buildbucket-builder-name`: optional builder-name substring to count; empty counts all builders

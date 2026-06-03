@@ -5,7 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 
+	"github.com/qmuntal/gobuilder/internal/buildbucket"
 	"github.com/qmuntal/gobuilder/internal/githubactions"
 	"github.com/qmuntal/gobuilder/internal/scheduler"
 )
@@ -23,7 +25,13 @@ func run() error {
 		return err
 	}
 
-	jobQueue, err := scheduler.NewFixedQueue(options.fixedJobs)
+	jobQueue, err := buildbucket.NewQueue(buildbucket.QueueConfig{
+		BaseURL:     options.buildbucketURL,
+		Project:     options.buildbucketProject,
+		Bucket:      options.buildbucketBucket,
+		Builder:     options.buildbucketBuilder,
+		BuilderName: options.buildbucketBuilderName,
+	})
 	if err != nil {
 		return err
 	}
@@ -48,32 +56,42 @@ func run() error {
 }
 
 type options struct {
-	fixedJobs      int
-	maxJobs        int
-	dryRun         bool
-	githubAPIURL   string
-	githubToken    string
-	repository     string
-	ref            string
-	schedulerRunID string
+	maxJobs                int
+	dryRun                 bool
+	githubAPIURL           string
+	githubToken            string
+	repository             string
+	ref                    string
+	schedulerRunID         string
+	buildbucketURL         string
+	buildbucketProject     string
+	buildbucketBucket      string
+	buildbucketBuilder     string
+	buildbucketBuilderName string
 }
 
 func parseOptions(args []string) (options, error) {
 	parsedOptions := options{
-		fixedJobs:    2,
-		maxJobs:      5,
-		githubAPIURL: githubactions.DefaultAPIURL,
+		maxJobs:            5,
+		githubAPIURL:       githubactions.DefaultAPIURL,
+		buildbucketURL:     buildbucket.DefaultURL,
+		buildbucketProject: "golang",
+		buildbucketBucket:  "ci",
 	}
 
 	flags := flag.NewFlagSet("scheduler", flag.ContinueOnError)
-	flags.IntVar(&parsedOptions.fixedJobs, "fixed-jobs", parsedOptions.fixedJobs, "queue depth returned by the fixed queue")
-	flags.IntVar(&parsedOptions.maxJobs, "max-jobs", parsedOptions.maxJobs, "maximum builder workflow runs to start")
+	flags.Var(optionalInt{value: &parsedOptions.maxJobs}, "max-jobs", "maximum builder workflow runs to start")
 	flags.BoolVar(&parsedOptions.dryRun, "dry-run", parsedOptions.dryRun, "print dispatch count without starting builder workflows")
 	flags.StringVar(&parsedOptions.githubAPIURL, "github-api-url", parsedOptions.githubAPIURL, "GitHub API base URL")
 	flags.StringVar(&parsedOptions.githubToken, "github-token", parsedOptions.githubToken, "GitHub token used to dispatch builder workflows")
 	flags.StringVar(&parsedOptions.repository, "repository", parsedOptions.repository, "repository in owner/name format")
 	flags.StringVar(&parsedOptions.ref, "ref", parsedOptions.ref, "git ref used for builder workflow dispatches")
 	flags.StringVar(&parsedOptions.schedulerRunID, "scheduler-run-id", parsedOptions.schedulerRunID, "GitHub run ID of the scheduler workflow")
+	flags.StringVar(&parsedOptions.buildbucketURL, "buildbucket-url", parsedOptions.buildbucketURL, "Buildbucket base URL")
+	flags.StringVar(&parsedOptions.buildbucketProject, "buildbucket-project", parsedOptions.buildbucketProject, "LUCI project to query")
+	flags.StringVar(&parsedOptions.buildbucketBucket, "buildbucket-bucket", parsedOptions.buildbucketBucket, "LUCI bucket to query")
+	flags.StringVar(&parsedOptions.buildbucketBuilder, "buildbucket-builder", parsedOptions.buildbucketBuilder, "optional exact LUCI builder to query")
+	flags.StringVar(&parsedOptions.buildbucketBuilderName, "buildbucket-builder-name", parsedOptions.buildbucketBuilderName, "only count queued jobs whose builder name contains this substring")
 
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
@@ -83,4 +101,29 @@ func parseOptions(args []string) (options, error) {
 	}
 
 	return parsedOptions, nil
+}
+
+type optionalInt struct {
+	value *int
+}
+
+func (option optionalInt) Set(rawValue string) error {
+	if rawValue == "" {
+		return nil
+	}
+
+	parsedValue, err := strconv.Atoi(rawValue)
+	if err != nil {
+		return err
+	}
+
+	*option.value = parsedValue
+	return nil
+}
+
+func (option optionalInt) String() string {
+	if option.value == nil {
+		return ""
+	}
+	return strconv.Itoa(*option.value)
 }

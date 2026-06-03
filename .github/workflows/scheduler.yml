@@ -5,14 +5,12 @@ on:
     - cron: "*/3 * * * *"
   workflow_dispatch:
     inputs:
-      fixed_jobs:
-        description: Queue size returned by the fixed queue
-        required: false
-        default: "2"
       max_jobs:
         description: Maximum builder runs to start
         required: false
-        default: "5"
+      builder_name:
+        description: Only count queued LUCI builders whose name contains this value
+        required: false
 
 permissions:
   actions: write
@@ -44,5 +42,5 @@ jobs:
           --repository "${{ github.repository }}"
           --ref "${{ github.ref_name }}"
           --scheduler-run-id "${{ github.run_id }}"
-          --fixed-jobs "${{ inputs.fixed_jobs || vars.SCHEDULER_FIXED_JOBS || '2' }}"
-          --max-jobs "${{ inputs.max_jobs || vars.SCHEDULER_MAX_JOBS || '5' }}"
+          --buildbucket-builder-name "${{ inputs.builder_name }}"
+          --max-jobs "${{ inputs.max_jobs }}"
