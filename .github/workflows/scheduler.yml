@@ -33,10 +33,15 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.mod
+
+      - name: Build scheduler
+        run: go build -o scheduler ./cmd/scheduler
 
       - name: Dispatch builder jobs
         run: >
-          go run ./cmd/scheduler
+          ./scheduler
           --github-api-url "${{ github.api_url }}"
           --github-token "${{ github.token }}"
           --repository "${{ github.repository }}"
