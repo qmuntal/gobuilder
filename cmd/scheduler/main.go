@@ -47,7 +47,7 @@ func run() error {
 		Queue:          jobQueue,
 		Dispatcher:     workflowDispatcher,
 		MaxJobs:        options.maxJobs,
-		Workflow:       "builder.yml",
+		Workflow:       options.workflow,
 		SchedulerRunID: options.schedulerRunID,
 		DryRun:         options.dryRun,
 		Output:         os.Stdout,
@@ -63,6 +63,7 @@ type options struct {
 	repository             string
 	ref                    string
 	schedulerRunID         string
+	workflow               string
 	buildbucketURL         string
 	buildbucketProject     string
 	buildbucketBucket      string
@@ -73,6 +74,7 @@ type options struct {
 func parseOptions(args []string) (options, error) {
 	parsedOptions := options{
 		maxJobs:            5,
+		workflow:           "builder.yml",
 		githubAPIURL:       githubactions.DefaultAPIURL,
 		buildbucketURL:     buildbucket.DefaultURL,
 		buildbucketProject: "golang",
@@ -87,6 +89,7 @@ func parseOptions(args []string) (options, error) {
 	flags.StringVar(&parsedOptions.repository, "repository", parsedOptions.repository, "repository in owner/name format")
 	flags.StringVar(&parsedOptions.ref, "ref", parsedOptions.ref, "git ref used for builder workflow dispatches")
 	flags.StringVar(&parsedOptions.schedulerRunID, "scheduler-run-id", parsedOptions.schedulerRunID, "GitHub run ID of the scheduler workflow")
+	flags.Var(optionalString{value: &parsedOptions.workflow}, "workflow", "GitHub Actions workflow file or ID to dispatch")
 	flags.StringVar(&parsedOptions.buildbucketURL, "buildbucket-url", parsedOptions.buildbucketURL, "Buildbucket base URL")
 	flags.StringVar(&parsedOptions.buildbucketProject, "buildbucket-project", parsedOptions.buildbucketProject, "LUCI project to query")
 	flags.StringVar(&parsedOptions.buildbucketBucket, "buildbucket-bucket", parsedOptions.buildbucketBucket, "LUCI bucket to query")
@@ -126,4 +129,24 @@ func (option optionalInt) String() string {
 		return ""
 	}
 	return strconv.Itoa(*option.value)
+}
+
+type optionalString struct {
+	value *string
+}
+
+func (option optionalString) Set(rawValue string) error {
+	if rawValue == "" {
+		return nil
+	}
+
+	*option.value = rawValue
+	return nil
+}
+
+func (option optionalString) String() string {
+	if option.value == nil {
+		return ""
+	}
+	return *option.value
 }
