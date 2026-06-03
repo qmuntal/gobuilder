@@ -1,0 +1,28 @@
+name: builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_index:
+        description: Queue item index
+        required: false
+      queue_depth:
+        description: Queue depth observed by scheduler
+        required: false
+      scheduler_run_id:
+        description: Scheduler run that started this builder
+        required: false
+
+permissions: {}
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Print Go version
+        run: go version

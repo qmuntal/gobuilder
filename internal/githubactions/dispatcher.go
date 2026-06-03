@@ -1,0 +1,108 @@
+package githubactions
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+)
+
+const DefaultAPIURL = "https://api.github.com"
+
+type Dispatcher struct {
+	Token      string
+	APIURL     string
+	Repository string
+	Ref        string
+	HTTPClient *http.Client
+}
+
+type DispatchRequest struct {
+	Workflow string
+	Inputs   map[string]string
+}
+
+func (dispatcher Dispatcher) DispatchWorkflow(ctx context.Context, dispatchRequest DispatchRequest) error {
+	owner, repositoryName, err := splitRepository(dispatcher.Repository)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(dispatchRequest.Workflow) == "" {
+		return fmt.Errorf("workflow is required")
+	}
+	if strings.TrimSpace(dispatcher.Ref) == "" {
+		return fmt.Errorf("ref is required")
+	}
+	if strings.TrimSpace(dispatcher.Token) == "" {
+		return fmt.Errorf("github token is required")
+	}
+
+	payloadBody, err := json.Marshal(struct {
+		Ref    string            `json:"ref"`
+		Inputs map[string]string `json:"inputs,omitempty"`
+	}{
+		Ref:    dispatcher.Ref,
+		Inputs: dispatchRequest.Inputs,
+	})
+	if err != nil {
+		return fmt.Errorf("encode workflow dispatch payload: %w", err)
+	}
+
+	apiURL := strings.TrimRight(dispatcher.APIURL, "/")
+	if apiURL == "" {
+		apiURL = DefaultAPIURL
+	}
+
+	requestURL := fmt.Sprintf(
+		"%s/repos/%s/%s/actions/workflows/%s/dispatches",
+		apiURL,
+		url.PathEscape(owner),
+		url.PathEscape(repositoryName),
+		url.PathEscape(dispatchRequest.Workflow),
+	)
+
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(payloadBody))
+	if err != nil {
+		return fmt.Errorf("create workflow dispatch request: %w", err)
+	}
+	httpRequest.Header.Set("Accept", "application/vnd.github+json")
+	httpRequest.Header.Set("Authorization", "Bearer "+strings.TrimSpace(dispatcher.Token))
+	httpRequest.Header.Set("Content-Type", "application/json")
+	httpRequest.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	httpClient := dispatcher.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
+
+	httpResponse, err := httpClient.Do(httpRequest)
+	if err != nil {
+		return fmt.Errorf("send workflow dispatch request: %w", err)
+	}
+	defer httpResponse.Body.Close()
+
+	if httpResponse.StatusCode != http.StatusNoContent {
+		responseBody, _ := io.ReadAll(io.LimitReader(httpResponse.Body, 4096))
+		trimmedBody := strings.TrimSpace(string(responseBody))
+		if trimmedBody != "" {
+			return fmt.Errorf("github workflow dispatch failed with status %d: %s", httpResponse.StatusCode, trimmedBody)
+		}
+		return fmt.Errorf("github workflow dispatch failed with status %d", httpResponse.StatusCode)
+	}
+
+	return nil
+}
+
+func splitRepository(repository string) (string, string, error) {
+	trimmedRepository := strings.Trim(strings.TrimSpace(repository), "/")
+	owner, repositoryName, found := strings.Cut(trimmedRepository, "/")
+	if !found || owner == "" || repositoryName == "" || strings.Contains(repositoryName, "/") {
+		return "", "", fmt.Errorf("repository must be in owner/name format")
+	}
+	return owner, repositoryName, nil
+}
