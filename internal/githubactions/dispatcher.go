@@ -86,7 +86,7 @@ func (dispatcher Dispatcher) DispatchWorkflow(ctx context.Context, dispatchReque
 	}
 	defer httpResponse.Body.Close()
 
-	if httpResponse.StatusCode != http.StatusNoContent {
+	if httpResponse.StatusCode < http.StatusOK || httpResponse.StatusCode >= http.StatusMultipleChoices {
 		responseBody, _ := io.ReadAll(io.LimitReader(httpResponse.Body, 4096))
 		trimmedBody := strings.TrimSpace(string(responseBody))
 		if trimmedBody != "" {

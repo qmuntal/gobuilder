@@ -63,3 +63,24 @@ func TestDispatchWorkflowRequiresToken(testingContext *testing.T) {
 		testingContext.Fatal("DispatchWorkflow() error = nil, want error")
 	}
 }
+
+func TestDispatchWorkflowAcceptsSuccessfulResponseWithBody(testingContext *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		responseWriter.Header().Set("Content-Type", "application/json")
+		responseWriter.WriteHeader(http.StatusOK)
+		_, _ = responseWriter.Write([]byte(`{"workflow_run_id":12345}`))
+	}))
+	defer server.Close()
+
+	dispatcher := Dispatcher{
+		Token:      "token",
+		APIURL:     server.URL,
+		Repository: "owner/repo",
+		Ref:        "main",
+		HTTPClient: server.Client(),
+	}
+	err := dispatcher.DispatchWorkflow(context.Background(), DispatchRequest{Workflow: "builder.yml"})
+	if err != nil {
+		testingContext.Fatalf("DispatchWorkflow() error = %v", err)
+	}
+}
