@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strconv"
 	"sync"
 
 	"github.com/qmuntal/gobuilder/internal/githubactions"
@@ -75,10 +74,6 @@ func Run(ctx context.Context, config Config) (Result, error) {
 		jobIndex := jobIndex
 		dispatchRequest := githubactions.DispatchRequest{
 			Workflow: config.Workflow,
-			Inputs: map[string]string{
-				"job_index":   strconv.Itoa(jobIndex),
-				"queue_depth": strconv.Itoa(queueDepth),
-			},
 		}
 
 		waitGroup.Go(func() {

@@ -3,7 +3,6 @@ package scheduler
 import (
 	"bytes"
 	"context"
-	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -42,12 +41,12 @@ func (dispatcher *recordingDispatcher) recordedRequests() []githubactions.Dispat
 }
 
 type blockingDispatcher struct {
-	started chan string
+	started chan struct{}
 	release <-chan struct{}
 }
 
 func (dispatcher blockingDispatcher) DispatchWorkflow(ctx context.Context, dispatchRequest githubactions.DispatchRequest) error {
-	dispatcher.started <- dispatchRequest.Inputs["job_index"]
+	dispatcher.started <- struct{}{}
 
 	select {
 	case <-dispatcher.release:
@@ -81,11 +80,13 @@ func TestRunCapsDispatchesAtMaximum(testingContext *testing.T) {
 	if len(requests) != 2 {
 		testingContext.Fatalf("dispatcher requests = %d, want 2", len(requests))
 	}
-	sort.Slice(requests, func(leftIndex, rightIndex int) bool {
-		return requests[leftIndex].Inputs["job_index"] < requests[rightIndex].Inputs["job_index"]
-	})
-	if requests[1].Inputs["job_index"] != "2" {
-		testingContext.Fatalf("second job_index = %q, want 2", requests[1].Inputs["job_index"])
+	for requestIndex, request := range requests {
+		if request.Workflow != "builder.yml" {
+			testingContext.Fatalf("request %d workflow = %q, want builder.yml", requestIndex, request.Workflow)
+		}
+		if len(request.Inputs) != 0 {
+			testingContext.Fatalf("request %d inputs = %v, want none", requestIndex, request.Inputs)
+		}
 	}
 }
 
@@ -104,7 +105,7 @@ func TestRunDryRunDoesNotRequireDispatcher(testingContext *testing.T) {
 }
 
 func TestRunDispatchesInParallel(testingContext *testing.T) {
-	started := make(chan string, 2)
+	started := make(chan struct{}, 2)
 	release := make(chan struct{})
 	errChannel := make(chan error, 1)
 
@@ -118,20 +119,13 @@ func TestRunDispatchesInParallel(testingContext *testing.T) {
 		errChannel <- err
 	}()
 
-	startedJobs := map[string]bool{}
 	for range 2 {
 		select {
-		case jobIndex := <-started:
-			startedJobs[jobIndex] = true
+		case <-started:
 		case <-time.After(2 * time.Second):
 			close(release)
 			testingContext.Fatal("timed out waiting for parallel dispatches to start")
 		}
-	}
-
-	if !startedJobs["1"] || !startedJobs["2"] {
-		close(release)
-		testingContext.Fatalf("started jobs = %v, want jobs 1 and 2", startedJobs)
 	}
 
 	close(release)

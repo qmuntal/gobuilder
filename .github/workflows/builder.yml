@@ -2,24 +2,69 @@ name: builder
 
 on:
   workflow_dispatch:
-    inputs:
-      job_index:
-        description: Queue item index
-        required: false
-      queue_depth:
-        description: Queue depth observed by scheduler
-        required: false
 
 permissions: {}
 
 jobs:
-  version:
-    runs-on: ubuntu-latest
+  luci:
+    runs-on: windows-11-arm
+    defaults:
+      run:
+        shell: pwsh
     steps:
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: stable
+      - name: Install CIPD
+        run: |
+          $cipdRoot = Join-Path $env:RUNNER_TEMP "cipd-bin"
+          New-Item -ItemType Directory -Force -Path $cipdRoot | Out-Null
+          curl.exe -sSL -o (Join-Path $cipdRoot "cipd.exe") "https://chrome-infra-packages.appspot.com/client?platform=windows-arm64&version=latest"
+          Add-Content -Path $env:GITHUB_PATH -Value $cipdRoot
 
-      - name: Print Go version
-        run: go version
+      - name: Install LUCI builder tools
+        run: |
+          $toolRoot = Join-Path $env:RUNNER_TEMP "luci-tools"
+          New-Item -ItemType Directory -Force -Path $toolRoot | Out-Null
+          cipd install infra/tools/luci_machine_tokend/windows-arm64 latest -root $toolRoot
+          curl.exe -sSL -o (Join-Path $toolRoot "bootstrapswarm.exe") "https://storage.googleapis.com/go-builder-data/windows-arm64-bootstrapswarm.exe"
+          Add-Content -Path $env:GITHUB_PATH -Value $toolRoot
+
+      - name: Prepare LUCI credentials
+        env:
+          LUCI_BOT_HOSTNAME: ${{ vars.LUCI_BOT_HOSTNAME }}
+          LUCI_BOT_CERT_PEM: ${{ vars.LUCI_BOT_CERT_PEM }}
+          LUCI_BOT_KEY_PEM: ${{ secrets.LUCI_BOT_KEY_PEM }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:LUCI_BOT_HOSTNAME)) { Write-Error "LUCI_BOT_HOSTNAME variable is required"; exit 1 }
+          if ([string]::IsNullOrWhiteSpace($env:LUCI_BOT_CERT_PEM)) { Write-Error "LUCI_BOT_CERT_PEM variable is required"; exit 1 }
+          if ([string]::IsNullOrWhiteSpace($env:LUCI_BOT_KEY_PEM)) { Write-Error "LUCI_BOT_KEY_PEM secret is required"; exit 1 }
+
+          $luciRoot = Join-Path $env:RUNNER_TEMP "luci"
+          New-Item -ItemType Directory -Force -Path $luciRoot | Out-Null
+
+          $certFile = Join-Path $luciRoot "hostname.cert"
+          $keyFile = Join-Path $luciRoot "hostname.key"
+          $tokenFile = Join-Path $luciRoot "token.json"
+          $statusFile = Join-Path $luciRoot "token-status.json"
+
+          [System.IO.File]::WriteAllText($certFile, $env:LUCI_BOT_CERT_PEM + [Environment]::NewLine)
+          [System.IO.File]::WriteAllText($keyFile, $env:LUCI_BOT_KEY_PEM + [Environment]::NewLine)
+
+          Add-Content -Path $env:GITHUB_ENV -Value "LUCI_BOT_HOSTNAME=$env:LUCI_BOT_HOSTNAME"
+          Add-Content -Path $env:GITHUB_ENV -Value "LUCI_CERT_FILE=$certFile"
+          Add-Content -Path $env:GITHUB_ENV -Value "LUCI_KEY_FILE=$keyFile"
+          Add-Content -Path $env:GITHUB_ENV -Value "LUCI_TOKEN_FILE=$tokenFile"
+          Add-Content -Path $env:GITHUB_ENV -Value "LUCI_TOKEN_STATUS_FILE=$statusFile"
+          Add-Content -Path $env:GITHUB_ENV -Value "LUCI_MACHINE_TOKEN=$tokenFile"
+          Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_NEVER_REBOOT=true"
+
+      - name: Mint LUCI machine token
+        run: >
+          luci_machine_tokend
+          -backend luci-token-server.appspot.com
+          -cert-pem "$env:LUCI_CERT_FILE"
+          -pkey-pem "$env:LUCI_KEY_FILE"
+          -token-file "$env:LUCI_TOKEN_FILE"
+          -status-file "$env:LUCI_TOKEN_STATUS_FILE"
+          -force-refresh
+
+      #- name: Register LUCI builder
+      #  run: bootstrapswarm -hostname "$env:LUCI_BOT_HOSTNAME"
