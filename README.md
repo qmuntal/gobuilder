@@ -9,6 +9,8 @@ This repository has two workflows:
 
 The `builder` workflow declares `permissions: {}` so the default `GITHUB_TOKEN` has no repository permissions. The `scheduler` workflow grants `contents: read` to check out the Go source and `actions: write` to dispatch `builder` in the same repository with the built-in token.
 
+The `scheduler` workflow uses a single GitHub Actions concurrency group, so overlapping scheduled or manual scheduler runs do not allocate builder slots at the same time.
+
 The scheduler counts queued Go LUCI builds by querying Buildbucket, the backend used by https://ci.chromium.org/ui/p/golang. It counts `SCHEDULED` builds in the `golang/ci` builder bucket, then starts up to the configured maximum number of `builder` workflow runs.
 
 - `--max-jobs`: maximum active builder workflow slots, default `5`
@@ -18,6 +20,8 @@ The scheduler counts queued Go LUCI builds by querying Buildbucket, the backend 
 - `--buildbucket-builder-name`: optional builder-name substring to count; empty counts all builders
 
 Before dispatching, the scheduler counts active builder workflow runs in GitHub Actions and reads their stable `bot_index` slots from the workflow run name. It starts only the remaining capacity up to `--max-jobs` and passes each new workflow the first free two-digit slot. The builder workflow uses that index as the suffix of the LUCI composite bot ID, keeping the bot pages stable in the LUCI UI while still allowing multiple concurrent slots. If an active workflow run does not expose a parseable slot, the scheduler dispatches no new builders rather than risk reusing an occupied bot ID.
+
+Manual `builder` workflow dispatches default to slot `99`; scheduler-dispatched runs use the first free slot in the configured active range.
 
 ## LUCI builder setup
 

@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -30,7 +29,6 @@ type DispatchRequest struct {
 }
 
 var activeWorkflowRunStatuses = []string{"requested", "queued", "in_progress", "waiting", "pending"}
-var workflowRunBotIndexPattern = regexp.MustCompile(`\bbot (\d{2})$`)
 
 type ActiveWorkflowRuns struct {
 	Count        int
@@ -46,16 +44,19 @@ func (dispatcher Dispatcher) ActiveWorkflowRuns(ctx context.Context, workflow st
 		return ActiveWorkflowRuns{}, fmt.Errorf("github token is required")
 	}
 
+	targetRunNamePrefix := workflowRunNamePrefix(workflow)
 	activeRuns := ActiveWorkflowRuns{BotIndexes: map[int]int{}}
 	for _, status := range activeWorkflowRunStatuses {
 		runs, err := dispatcher.workflowRuns(ctx, workflow, status)
 		if err != nil {
 			return ActiveWorkflowRuns{}, err
 		}
-		activeRuns.Count += runs.TotalCount
-		activeRuns.UnknownCount += runs.TotalCount - len(runs.Runs)
 		for _, run := range runs.Runs {
-			botIndex, ok := parseWorkflowRunBotIndex(run.DisplayTitle)
+			botIndex, isTargetRun, ok := parseWorkflowRunBotIndex(run.DisplayTitle, targetRunNamePrefix)
+			if !isTargetRun {
+				continue
+			}
+			activeRuns.Count++
 			if !ok {
 				activeRuns.UnknownCount++
 				continue
@@ -93,11 +94,28 @@ func (dispatcher Dispatcher) workflowRuns(ctx context.Context, workflow, status 
 		url.PathEscape(repositoryName),
 		url.PathEscape(workflow),
 	)
-	query := url.Values{}
-	query.Set("status", status)
-	query.Set("per_page", "100")
-	requestURL += "?" + query.Encode()
+	var allRuns workflowRunsResponse
+	for page := 1; ; page++ {
+		query := url.Values{}
+		query.Set("status", status)
+		query.Set("per_page", "100")
+		query.Set("page", strconv.Itoa(page))
 
+		pageResponse, err := dispatcher.workflowRunsPage(ctx, requestURL+"?"+query.Encode())
+		if err != nil {
+			return workflowRunsResponse{}, err
+		}
+		if page == 1 {
+			allRuns.TotalCount = pageResponse.TotalCount
+		}
+		allRuns.Runs = append(allRuns.Runs, pageResponse.Runs...)
+		if len(pageResponse.Runs) == 0 || len(allRuns.Runs) >= allRuns.TotalCount {
+			return allRuns, nil
+		}
+	}
+}
+
+func (dispatcher Dispatcher) workflowRunsPage(ctx context.Context, requestURL string) (workflowRunsResponse, error) {
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return workflowRunsResponse{}, fmt.Errorf("create workflow runs request: %w", err)
@@ -131,16 +149,36 @@ func (dispatcher Dispatcher) workflowRuns(ctx context.Context, workflow, status 
 	return payload, nil
 }
 
-func parseWorkflowRunBotIndex(displayTitle string) (int, bool) {
-	matches := workflowRunBotIndexPattern.FindStringSubmatch(strings.TrimSpace(displayTitle))
-	if matches == nil {
-		return 0, false
+func workflowRunNamePrefix(workflow string) string {
+	workflow = strings.TrimSpace(workflow)
+	if index := strings.LastIndexAny(workflow, `/\`); index >= 0 {
+		workflow = workflow[index+1:]
 	}
-	botIndex, err := strconv.Atoi(matches[1])
+	workflow = strings.TrimSuffix(strings.TrimSuffix(workflow, ".yaml"), ".yml")
+	return workflow + " bot "
+}
+
+func parseWorkflowRunBotIndex(displayTitle, targetRunNamePrefix string) (botIndex int, isTargetRun bool, ok bool) {
+	displayTitle = strings.TrimSpace(displayTitle)
+	if !strings.HasPrefix(displayTitle, targetRunNamePrefix) {
+		return 0, false, false
+	}
+
+	rawBotIndex := strings.TrimSpace(strings.TrimPrefix(displayTitle, targetRunNamePrefix))
+	if len(rawBotIndex) != 2 {
+		return 0, true, false
+	}
+	for _, digit := range rawBotIndex {
+		if digit < '0' || digit > '9' {
+			return 0, true, false
+		}
+	}
+
+	botIndex, err := strconv.Atoi(rawBotIndex)
 	if err != nil || botIndex < 1 {
-		return 0, false
+		return 0, true, false
 	}
-	return botIndex, true
+	return botIndex, true, true
 }
 
 func (dispatcher Dispatcher) DispatchWorkflow(ctx context.Context, dispatchRequest DispatchRequest) error {

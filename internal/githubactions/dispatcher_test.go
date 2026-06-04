@@ -71,7 +71,7 @@ func TestActiveWorkflowRunsCountsActiveStatuses(testingContext *testing.T) {
 		if request.Method != http.MethodGet {
 			testingContext.Fatalf("request method = %s, want GET", request.Method)
 		}
-		if request.URL.Path != "/repos/owner/repo/actions/workflows/builder.yml/runs" {
+		if request.URL.Path != "/repos/owner/repo/actions/workflows/builder-windows-arm64.yml/runs" {
 			testingContext.Fatalf("request path = %s", request.URL.Path)
 		}
 		if request.Header.Get("Authorization") != "Bearer token" {
@@ -82,7 +82,7 @@ func TestActiveWorkflowRunsCountsActiveStatuses(testingContext *testing.T) {
 		requestedStatuses[status] = true
 		responseWriter.Header().Set("Content-Type", "application/json")
 		if status == "in_progress" {
-			_, _ = responseWriter.Write([]byte(`{"total_count":2,"workflow_runs":[{"display_title":"builder-windows-arm64 bot 02"},{"display_title":"builder-windows-arm64 bot 04"}]}`))
+			_, _ = responseWriter.Write([]byte(`{"total_count":3,"workflow_runs":[{"display_title":"builder-windows-arm64 bot 02"},{"display_title":"builder-linux-amd64 bot 03"},{"display_title":"builder-windows-arm64 bot 04"}]}`))
 			return
 		}
 		_, _ = responseWriter.Write([]byte(`{"total_count":0,"workflow_runs":[]}`))
@@ -95,7 +95,7 @@ func TestActiveWorkflowRunsCountsActiveStatuses(testingContext *testing.T) {
 		Repository: "owner/repo",
 		HTTPClient: server.Client(),
 	}
-	activeRuns, err := dispatcher.ActiveWorkflowRuns(context.Background(), "builder.yml")
+	activeRuns, err := dispatcher.ActiveWorkflowRuns(context.Background(), "builder-windows-arm64.yml")
 	if err != nil {
 		testingContext.Fatalf("ActiveWorkflowRuns() error = %v", err)
 	}
@@ -125,7 +125,7 @@ func TestActiveWorkflowRunsCountsUnknownRuns(testingContext *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
 		responseWriter.Header().Set("Content-Type", "application/json")
 		if request.URL.Query().Get("status") == "queued" {
-			_, _ = responseWriter.Write([]byte(`{"total_count":1,"workflow_runs":[{"display_title":"builder-windows-arm64"}]}`))
+			_, _ = responseWriter.Write([]byte(`{"total_count":2,"workflow_runs":[{"display_title":"builder-windows-arm64 bot unknown"},{"display_title":"builder-linux-amd64 bot 01"}]}`))
 			return
 		}
 		_, _ = responseWriter.Write([]byte(`{"total_count":0,"workflow_runs":[]}`))
@@ -138,7 +138,7 @@ func TestActiveWorkflowRunsCountsUnknownRuns(testingContext *testing.T) {
 		Repository: "owner/repo",
 		HTTPClient: server.Client(),
 	}
-	activeRuns, err := dispatcher.ActiveWorkflowRuns(context.Background(), "builder.yml")
+	activeRuns, err := dispatcher.ActiveWorkflowRuns(context.Background(), "builder-windows-arm64.yml")
 	if err != nil {
 		testingContext.Fatalf("ActiveWorkflowRuns() error = %v", err)
 	}
