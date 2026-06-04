@@ -8,6 +8,7 @@ on:
       max_jobs:
         description: Maximum builder runs to start
         required: false
+        default: 5
       builder_name:
         description: Only count queued LUCI builders whose name contains this value
         required: false

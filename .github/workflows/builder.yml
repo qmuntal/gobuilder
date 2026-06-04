@@ -38,8 +38,51 @@ jobs:
           $tokenFile = Join-Path $luciRoot "token.json"
           $statusFile = Join-Path $luciRoot "token-status.json"
 
-          [System.IO.File]::WriteAllText($certFile, $env:LUCI_BOT_CERT_PEM + [Environment]::NewLine)
-          [System.IO.File]::WriteAllText($keyFile, $env:LUCI_BOT_KEY_PEM + [Environment]::NewLine)
+          function Convert-ToPemText {
+            param(
+              [Parameter(Mandatory = $true)][string] $Value,
+              [Parameter(Mandatory = $true)][string] $Name,
+              [Parameter(Mandatory = $true)][string[]] $ExpectedLabels
+            )
+
+            $pem = $Value.Trim().Replace("\r\n", "`n").Replace("\n", "`n").Replace("`r`n", "`n").Replace("`r", "`n").Trim()
+            $hasExpectedLabel = $false
+            foreach ($expectedLabel in $ExpectedLabels) {
+              if ($pem.Contains("-----BEGIN $expectedLabel-----") -and $pem.Contains("-----END $expectedLabel-----")) {
+                $hasExpectedLabel = $true
+                break
+              }
+            }
+            if (-not $hasExpectedLabel) {
+              Write-Error "$Name must be a PEM block containing one of: $($ExpectedLabels -join ', ')"
+              exit 1
+            }
+
+            return $pem + "`n"
+          }
+
+          [System.IO.File]::WriteAllText($certFile, (Convert-ToPemText -Value $env:LUCI_BOT_CERT_PEM -Name "LUCI_BOT_CERT_PEM" -ExpectedLabels @("CERTIFICATE")), [System.Text.Encoding]::ASCII)
+          [System.IO.File]::WriteAllText($keyFile, (Convert-ToPemText -Value $env:LUCI_BOT_KEY_PEM -Name "LUCI_BOT_KEY_PEM" -ExpectedLabels @("RSA PRIVATE KEY", "PRIVATE KEY")), [System.Text.Encoding]::ASCII)
+
+          try {
+            $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certFile)
+            $certificate.Dispose()
+          } catch {
+            Write-Error "LUCI_BOT_CERT_PEM was written but could not be parsed as an X.509 certificate"
+            exit 1
+          }
+
+          try {
+            $rsa = [System.Security.Cryptography.RSA]::Create()
+            try {
+              $rsa.ImportFromPem([System.IO.File]::ReadAllText($keyFile))
+            } finally {
+              $rsa.Dispose()
+            }
+          } catch {
+            Write-Error "LUCI_BOT_KEY_PEM was written but could not be parsed as an RSA private key"
+            exit 1
+          }
 
           Add-Content -Path $env:GITHUB_ENV -Value "LUCI_BOT_HOSTNAME=$env:LUCI_BOT_HOSTNAME"
           Add-Content -Path $env:GITHUB_ENV -Value "LUCI_CERT_FILE=$certFile"
