@@ -25,10 +25,9 @@ jobs:
       LUCI_BOT_HOSTNAME_PREFIX: windows-arm64-azure-qmuntal
       LUCI_MACHINE_TOKEND_SHA256: df1c5646ef5f9d41f2bd1e57ad0ba8acdb6e8d8c0dc70ee3cf382a7d60387697
       LUCI_MACHINE_TOKEN_BACKEND: luci-token-server.appspot.com
-      LUCI_MACHINE_TOKEN: C:\golang\token.json
+      LUCI_MACHINE_TOKEN_FILE: C:\luci_machine_tokend\token.json
       LUCI_TOOL_ROOT: C:\golang
       PYWIN32_VERSION: "312"
-      SWARMING_HOME: C:\swarming-home
       SWARMING_USER: swarming
       SWARMING_WORKDIR: C:\b
     defaults:
@@ -111,8 +110,14 @@ jobs:
           }
 
           # Put llvm-mingw at the front of PATH so its gcc/clang shadow
-          # the x86-64 MinGW gcc that ships with Git for Windows.
+          # the x86-64 MinGW gcc that ships with Git for Windows. Also
+          # update Machine PATH because the Swarming bot is started with
+          # -UseNewEnvironment and will not inherit this step's process PATH.
           Add-Content -Path $env:GITHUB_PATH -Value $bin
+          $machinePath = [Environment]::GetEnvironmentVariable("PATH", [EnvironmentVariableTarget]::Machine)
+          if (($machinePath -split ";") -notcontains $bin) {
+            [Environment]::SetEnvironmentVariable("PATH", "$bin;$machinePath", [EnvironmentVariableTarget]::Machine)
+          }
           $env:PATH = "$bin;$env:PATH"
 
           Write-Host "CC: $(gcc --version 2>&1 | Select-Object -First 1)"
@@ -152,6 +157,11 @@ jobs:
 
           $version = & $python.Source -c "import platform; print(platform.python_version())"
           $cacheDir = & $python.Source -m pip cache dir
+          $pythonDir = Split-Path -Parent $python.Source
+          $machinePath = [Environment]::GetEnvironmentVariable("PATH", [EnvironmentVariableTarget]::Machine)
+          if (($machinePath -split ";") -notcontains $pythonDir) {
+            [Environment]::SetEnvironmentVariable("PATH", "$pythonDir;$machinePath", [EnvironmentVariableTarget]::Machine)
+          }
           Add-Content -Path $env:GITHUB_ENV -Value "PYTHON_EXE=$($python.Source)"
           Add-Content -Path $env:GITHUB_ENV -Value "PIP_CACHE_DIR=$cacheDir"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
@@ -190,12 +200,8 @@ jobs:
           }
 
           New-Item -ItemType Directory -Force -Path $env:SWARMING_WORKDIR | Out-Null
-          New-Item -ItemType Directory -Force -Path $env:SWARMING_HOME | Out-Null
-          New-Item -ItemType Directory -Force -Path (Join-Path $env:SWARMING_HOME "temp") | Out-Null
           icacls $env:SWARMING_WORKDIR /setowner $env:SWARMING_USER
           icacls $env:SWARMING_WORKDIR /grant "${env:SWARMING_USER}:(OI)(CI)F"
-          icacls $env:SWARMING_HOME /setowner $env:SWARMING_USER
-          icacls $env:SWARMING_HOME /grant "${env:SWARMING_USER}:(OI)(CI)F"
 
           Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_PASSWORD=$swarmingPassword"
 
@@ -203,6 +209,10 @@ jobs:
         timeout-minutes: 5
         run: |
           New-Item -ItemType Directory -Force -Path $env:LUCI_TOOL_ROOT | Out-Null
+          $machinePath = [Environment]::GetEnvironmentVariable("PATH", [EnvironmentVariableTarget]::Machine)
+          if (($machinePath -split ";") -notcontains $env:LUCI_TOOL_ROOT) {
+            [Environment]::SetEnvironmentVariable("PATH", "$env:LUCI_TOOL_ROOT;$machinePath", [EnvironmentVariableTarget]::Machine)
+          }
           & $env:VERIFIED_DOWNLOAD_SCRIPT `
             -Uri "https://storage.googleapis.com/go-builder-data/windows-arm64-luci_machine_tokend.exe" `
             -OutFile (Join-Path $env:LUCI_TOOL_ROOT "luci_machine_tokend.exe") `
@@ -223,7 +233,10 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:LUCI_BOT_KEY_PEM)) { Write-Error "LUCI_BOT_KEY_PEM secret is required"; exit 1 }
 
           $luciRoot = Join-Path $env:RUNNER_TEMP "luci"
+          $tokenDir = Split-Path -Parent $env:LUCI_MACHINE_TOKEN_FILE
           New-Item -ItemType Directory -Force -Path $luciRoot | Out-Null
+          New-Item -ItemType Directory -Force -Path $tokenDir | Out-Null
+          icacls $tokenDir /grant "${env:SWARMING_USER}:(OI)(CI)RX"
 
           $certFile = Join-Path $luciRoot "hostname.cert"
           $keyFile = Join-Path $luciRoot "hostname.key"
@@ -240,7 +253,7 @@ jobs:
               -backend $env:LUCI_MACHINE_TOKEN_BACKEND `
               -cert-pem $certFile `
               -pkey-pem $keyFile `
-              -token-file $env:LUCI_MACHINE_TOKEN
+              -token-file $env:LUCI_MACHINE_TOKEN_FILE
             $tokenExitCode = $LASTEXITCODE
           } finally {
             Remove-Item -Path $certFile, $keyFile -Force -ErrorAction SilentlyContinue
@@ -249,33 +262,24 @@ jobs:
             exit $tokenExitCode
           }
 
-          icacls $env:LUCI_MACHINE_TOKEN /grant "${env:SWARMING_USER}:R"
+          icacls $env:LUCI_MACHINE_TOKEN_FILE /grant "${env:SWARMING_USER}:R"
 
       - name: Register LUCI builder
         # The minted LUCI machine token is valid for 60 minutes, so increasing
         # this timeout would not extend the usable bot lifetime.
         timeout-minutes: 60
         run: |
-          $swarmingTemp = Join-Path $env:SWARMING_HOME "temp"
-          New-Item -ItemType Directory -Force -Path $swarmingTemp | Out-Null
-
-          $environment = @{
-            TEMP = $swarmingTemp
-            TMP = $swarmingTemp
-            USERPROFILE = $env:SWARMING_HOME
-            USERNAME = $env:SWARMING_USER
-            USER = $env:SWARMING_USER
-            LOGNAME = $env:SWARMING_USER
-            LUCI_MACHINE_TOKEN = $env:LUCI_MACHINE_TOKEN
-          }
-
           $securePassword = ConvertTo-SecureString $env:SWARMING_PASSWORD -AsPlainText -Force
           $credential = [System.Management.Automation.PSCredential]::new(".\$env:SWARMING_USER", $securePassword)
+          # -UseNewEnvironment asks Windows to construct the child environment
+          # from Machine scope and the swarming user's profile, avoiding
+          # inherited runneradmin profile paths such as APPDATA and USERPROFILE.
           $process = Start-Process `
             -FilePath (Join-Path $env:LUCI_TOOL_ROOT "bootstrapswarm.exe") `
             -ArgumentList @("-hostname", $env:LUCI_BOT_HOSTNAME) `
             -Credential $credential `
-            -Environment $environment `
+            -LoadUserProfile `
+            -UseNewEnvironment `
             -WorkingDirectory $env:SWARMING_WORKDIR `
             -Wait `
             -PassThru

@@ -203,7 +203,7 @@ Residual risk: the key still exists in the job environment and temporary files d
 
 ### 9. The Swarming bot receives only the minted LUCI machine token path
 
-Decision: `bootstrapswarm.exe` runs with `LUCI_MACHINE_TOKEN` pointing to `token.json`; the PEM files are deleted before `bootstrapswarm.exe` starts.
+Decision: `bootstrapswarm.exe` reads `token.json` from its default Windows token path, `C:\luci_machine_tokend\token.json`; the PEM files are deleted before `bootstrapswarm.exe` starts.
 
 Rationale: the Swarming bot needs the machine token, not the original private key.
 
@@ -217,7 +217,7 @@ Decision: the workflow creates or updates a local `swarming` user, assigns a gen
 
 Rationale: this matches the expected LUCI builder shape more closely than running the bot directly as the default Actions user.
 
-Security effect: gives the bot a predictable profile, home directory, temp directory, and working directory while avoiding reuse of the default runner account state.
+Security effect: avoids running the bot as the default runner account and avoids inheriting the default runner account's profile environment.
 
 Residual risk: the `swarming` user is added to Administrators to match builder expectations. This is not a sandbox boundary against malicious build payloads.
 

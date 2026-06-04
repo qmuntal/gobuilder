@@ -31,7 +31,7 @@ The `builder-windows-arm64` workflow follows the Go dashboard builder setup by m
 
 The `builder-windows-arm64` workflow runs on a Windows ARM64 runner. It downloads `luci_machine_tokend.exe` and `bootstrapswarm.exe` from `go-builder-data`, matching the Azure Windows ARM64 setup in `golang/build`. The Swarming bot handles CIPD-managed payloads after it starts.
 
-The certificate and private key are only used while minting `token.json`; the workflow deletes those PEM files before starting `bootstrapswarm`. `bootstrapswarm` runs as the local `swarming` user and receives only the `LUCI_MACHINE_TOKEN` path, matching the Azure setup where the token file is read by the Swarming bot.
+The certificate and private key are only used while minting `token.json`; the workflow deletes those PEM files before starting `bootstrapswarm`. The token is written to `C:\luci_machine_tokend\token.json`, which is `bootstrapswarm`'s default Windows token path, and the local `swarming` user is granted read access to it.
 
 The workflow registers each GitHub Actions run as a LUCI composite bot ID of the form `windows-arm64-azure-qmuntal--NN`, where `NN` is the stable `bot_index` slot. LUCI Swarming uses the suffix after `--` as the bot slot identifier, while the host identity used for bot auth and bot group lookup is the base `windows-arm64-azure-qmuntal`. The LUCI bot certificate and bots.cfg entry should therefore be issued/configured for the base hostname, not for a single suffixed slot.
 

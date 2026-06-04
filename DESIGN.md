@@ -246,11 +246,11 @@ Result: updates to mirrored dependencies require both metadata and runtime workf
 
 ### Dedicated Swarming User
 
-Decision: the builder workflow creates or updates a local `swarming` user, prepares `C:\b` and `C:\swarming-home`, and starts `bootstrapswarm.exe` under that account.
+Decision: the builder workflow creates or updates a local `swarming` user, prepares `C:\b`, and starts `bootstrapswarm.exe` under that account with `Start-Process -Credential -LoadUserProfile -UseNewEnvironment`. Tool paths needed by the Swarming process are written to Machine-scope `PATH` before launch. The LUCI machine token is written to `C:\luci_machine_tokend\token.json`, which is `bootstrapswarm`'s default Windows token path, so no `LUCI_MACHINE_TOKEN` environment variable is needed.
 
-Rationale: this matches the shape expected by the Go LUCI Windows builder setup more closely than running everything as the default GitHub Actions user.
+Rationale: this approximates the Go Azure builders' interactive `swarming` login model without rebooting the GitHub-hosted runner. `-UseNewEnvironment` avoids inheriting the GitHub runner account's profile variables, while `-LoadUserProfile` initializes the target user's Windows profile state.
 
-Result: Swarming runs with predictable home, temp, and work directories.
+Result: Swarming runs with the normal Windows profile paths for the `swarming` user, while build work still happens under `C:\b`.
 
 ### Tool Cleanup
 
