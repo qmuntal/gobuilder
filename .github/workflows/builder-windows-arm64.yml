@@ -21,7 +21,6 @@ jobs:
       LLVM_MINGW_VERSION: "20250514"
       LLVM_MINGW_DIR: C:\llvm-mingw
       LUCI_BOT_HOSTNAME_PREFIX: windows-arm64-azure-qmuntal
-      LUCI_SWARMING_HOST: chromium-swarm.appspot.com
     defaults:
       run:
         shell: pwsh
@@ -111,7 +110,7 @@ jobs:
             $python = Get-Command python -ErrorAction SilentlyContinue
           }
           if (-not $python) {
-            Write-Error "python or python3 is required for the Swarming bot"
+            Write-Error "python or python3 is required for bootstrapswarm"
             exit 1
           }
 
@@ -168,11 +167,12 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_WORKDIR=$swarmingWorkDir"
           Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_HOME=$swarmingHomeDir"
 
-      - name: Install LUCI machine token tool
+      - name: Install LUCI builder tools
         run: |
           $toolRoot = "C:\golang"
           New-Item -ItemType Directory -Force -Path $toolRoot | Out-Null
           curl.exe -sSL -o (Join-Path $toolRoot "luci_machine_tokend.exe") "https://storage.googleapis.com/go-builder-data/windows-arm64-luci_machine_tokend.exe"
+          curl.exe -sSL -o (Join-Path $toolRoot "bootstrapswarm.exe") "https://storage.googleapis.com/go-builder-data/windows-arm64-bootstrapswarm.exe"
           icacls $toolRoot /grant "${env:SWARMING_USER}:(OI)(CI)RX"
           Add-Content -Path $env:GITHUB_PATH -Value $toolRoot
 
@@ -222,69 +222,6 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "LUCI_BOT_HOSTNAME=$env:LUCI_BOT_HOSTNAME"
           Add-Content -Path $env:GITHUB_ENV -Value "LUCI_MACHINE_TOKEN=$tokenFile"
 
-      - name: Download one-shot Swarming bot
-        run: |
-          $tokenPayload = Get-Content -Raw -Path $env:LUCI_MACHINE_TOKEN | ConvertFrom-Json
-          $machineToken = $tokenPayload.luci_machine_token
-          if ([string]::IsNullOrWhiteSpace($machineToken)) {
-            Write-Error "LUCI machine token file does not contain luci_machine_token"
-            exit 1
-          }
-
-          $swarmingRoot = Join-Path $env:SWARMING_HOME ".swarming"
-          New-Item -ItemType Directory -Force -Path $swarmingRoot | Out-Null
-          $botZip = Join-Path $swarmingRoot "swarming_bot.zip"
-          $headers = @{
-            "X-Luci-Machine-Token" = $machineToken
-            "X-Luci-Swarming-Bot-ID" = $env:LUCI_BOT_HOSTNAME
-          }
-
-          Invoke-WebRequest -Uri "https://$env:LUCI_SWARMING_HOST/bot_code" -Headers $headers -OutFile $botZip -UseBasicParsing
-
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $archive = [System.IO.Compression.ZipFile]::Open($botZip, [System.IO.Compression.ZipArchiveMode]::Update)
-          try {
-            $entry = $archive.GetEntry("config/bot_config.py")
-            if ($null -eq $entry) {
-              Write-Error "swarming_bot.zip does not contain config/bot_config.py"
-              exit 1
-            }
-
-            $reader = [System.IO.StreamReader]::new($entry.Open(), [System.Text.Encoding]::UTF8)
-            try {
-              $botConfig = $reader.ReadToEnd()
-            } finally {
-              $reader.Dispose()
-            }
-
-            $entry.Delete()
-            $entry = $archive.CreateEntry("config/bot_config.py", [System.IO.Compression.CompressionLevel]::Optimal)
-            $writer = [System.IO.StreamWriter]::new($entry.Open(), [System.Text.UTF8Encoding]::new($false))
-            try {
-              $writer.Write($botConfig)
-              $oneShotHook = @(
-                "",
-                "",
-                "# Injected by qmuntal/gobuilder: retire this ephemeral GitHub Actions bot after one task.",
-                "def on_after_task(bot, failure, internal_failure, task_dimensions, summary):",
-                "  import sys",
-                "  try:",
-                "    bot.post_event('bot_shutdown', 'GitHub Actions builder completed one task; exiting')",
-                "  finally:",
-                "    sys.exit(0)",
-                ""
-              ) -join "`n"
-              $writer.Write($oneShotHook)
-            } finally {
-              $writer.Dispose()
-            }
-          } finally {
-            $archive.Dispose()
-          }
-
-          icacls $botZip /grant "${env:SWARMING_USER}:F"
-          Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_BOT_ZIP=$botZip"
-
       - name: Register LUCI builder
         run: |
           $swarmingTemp = Join-Path $env:SWARMING_HOME "temp"
@@ -298,10 +235,10 @@ jobs:
             USER = $env:SWARMING_USER
             LOGNAME = $env:SWARMING_USER
             SWARMING_NEVER_REBOOT = "true"
-            SWARMING_BOT_ID = $env:LUCI_BOT_HOSTNAME
+            LUCI_MACHINE_TOKEN = $env:LUCI_MACHINE_TOKEN
           }
 
           $securePassword = ConvertTo-SecureString $env:SWARMING_PASSWORD -AsPlainText -Force
           $credential = [System.Management.Automation.PSCredential]::new(".\$env:SWARMING_USER", $securePassword)
-          $process = Start-Process -FilePath $env:PYTHON_EXE -ArgumentList @($env:SWARMING_BOT_ZIP, "start_bot") -Credential $credential -Environment $environment -WorkingDirectory $env:SWARMING_WORKDIR -Wait -PassThru
+          $process = Start-Process -FilePath "C:\golang\bootstrapswarm.exe" -ArgumentList @("-hostname", $env:LUCI_BOT_HOSTNAME) -Credential $credential -Environment $environment -WorkingDirectory $env:SWARMING_WORKDIR -Wait -PassThru
           exit $process.ExitCode
