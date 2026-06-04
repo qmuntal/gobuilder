@@ -201,12 +201,7 @@ jobs:
           $env:HOMEPATH = "\b"
           $env:SWARMING_NEVER_REBOOT = "true"
 
-          $stdout = Join-Path $env:SWARMING_WORKDIR "bootstrapswarm.stdout.log"
-          $stderr = Join-Path $env:SWARMING_WORKDIR "bootstrapswarm.stderr.log"
           $securePassword = ConvertTo-SecureString $env:SWARMING_PASSWORD -AsPlainText -Force
           $credential = [System.Management.Automation.PSCredential]::new(".\$env:SWARMING_USER", $securePassword)
-          $process = Start-Process -FilePath "C:\golang\bootstrapswarm.exe" -ArgumentList @("-hostname", $env:LUCI_BOT_HOSTNAME) -Credential $credential -WorkingDirectory $env:SWARMING_WORKDIR -RedirectStandardOutput $stdout -RedirectStandardError $stderr -Wait -PassThru
-
-          if (Test-Path $stdout) { Get-Content $stdout }
-          if (Test-Path $stderr) { Get-Content $stderr }
+          $process = Start-Process -FilePath "C:\golang\bootstrapswarm.exe" -ArgumentList @("-hostname", $env:LUCI_BOT_HOSTNAME) -Credential $credential -WorkingDirectory $env:SWARMING_WORKDIR -Wait -PassThru
           exit $process.ExitCode
