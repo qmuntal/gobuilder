@@ -126,14 +126,19 @@ jobs:
           }
 
           $swarmingWorkDir = "C:\b"
+          $swarmingHomeDir = "C:\swarming-home"
           New-Item -ItemType Directory -Force -Path $swarmingWorkDir | Out-Null
-          New-Item -ItemType Directory -Force -Path (Join-Path $swarmingWorkDir "temp") | Out-Null
+          New-Item -ItemType Directory -Force -Path $swarmingHomeDir | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $swarmingHomeDir "temp") | Out-Null
           icacls $swarmingWorkDir /setowner $swarmingUser
           icacls $swarmingWorkDir /grant "${swarmingUser}:(OI)(CI)F"
+          icacls $swarmingHomeDir /setowner $swarmingUser
+          icacls $swarmingHomeDir /grant "${swarmingUser}:(OI)(CI)F"
 
           Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_USER=$swarmingUser"
           Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_PASSWORD=$swarmingPassword"
           Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_WORKDIR=$swarmingWorkDir"
+          Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_HOME=$swarmingHomeDir"
 
       - name: Install LUCI builder tools
         run: |
@@ -187,21 +192,23 @@ jobs:
 
           Add-Content -Path $env:GITHUB_ENV -Value "LUCI_BOT_HOSTNAME=$env:LUCI_BOT_HOSTNAME"
           Add-Content -Path $env:GITHUB_ENV -Value "LUCI_MACHINE_TOKEN=$tokenFile"
-          Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_NEVER_REBOOT=true"
 
       - name: Register LUCI builder
         run: |
-          $swarmingTemp = Join-Path $env:SWARMING_WORKDIR "temp"
+          $swarmingTemp = Join-Path $env:SWARMING_HOME "temp"
           New-Item -ItemType Directory -Force -Path $swarmingTemp | Out-Null
-          $env:TEMP = $swarmingTemp
-          $env:TMP = $swarmingTemp
-          $env:HOME = $env:SWARMING_WORKDIR
-          $env:USERPROFILE = $env:SWARMING_WORKDIR
-          $env:HOMEDRIVE = "C:"
-          $env:HOMEPATH = "\b"
-          $env:SWARMING_NEVER_REBOOT = "true"
+
+          $environment = @{
+            TEMP = $swarmingTemp
+            TMP = $swarmingTemp
+            USERPROFILE = $env:SWARMING_HOME
+            USERNAME = $env:SWARMING_USER
+            USER = $env:SWARMING_USER
+            LOGNAME = $env:SWARMING_USER
+            SWARMING_NEVER_REBOOT = "true"
+          }
 
           $securePassword = ConvertTo-SecureString $env:SWARMING_PASSWORD -AsPlainText -Force
           $credential = [System.Management.Automation.PSCredential]::new(".\$env:SWARMING_USER", $securePassword)
-          $process = Start-Process -FilePath "C:\golang\bootstrapswarm.exe" -ArgumentList @("-hostname", $env:LUCI_BOT_HOSTNAME) -Credential $credential -WorkingDirectory $env:SWARMING_WORKDIR -Wait -PassThru
+          $process = Start-Process -FilePath "C:\golang\bootstrapswarm.exe" -ArgumentList @("-hostname", $env:LUCI_BOT_HOSTNAME) -Credential $credential -Environment $environment -WorkingDirectory $env:SWARMING_WORKDIR -Wait -PassThru
           exit $process.ExitCode
