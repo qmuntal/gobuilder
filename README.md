@@ -27,7 +27,6 @@ The certificate and private key are only used while minting `token.json`; the wo
 
 Required repository variables:
 
-- `LUCI_BOT_HOSTNAME`: approved bot hostname, such as `<GOOS>-<GOARCH>-<github-handle>`
 - `LUCI_BOT_CERT_PEM`: certificate PEM issued by the Go team
 
 Required repository secrets:

@@ -11,6 +11,7 @@ jobs:
     env:
       LLVM_MINGW_VERSION: "20250514"
       LLVM_MINGW_DIR: C:\llvm-mingw
+      LUCI_BOT_HOSTNAME: windows-arm64-azure-qmuntal--02
     defaults:
       run:
         shell: pwsh
@@ -126,11 +127,9 @@ jobs:
 
       - name: Mint LUCI machine token
         env:
-          LUCI_BOT_HOSTNAME: ${{ vars.LUCI_BOT_HOSTNAME }}
           LUCI_BOT_CERT_PEM: ${{ vars.LUCI_BOT_CERT_PEM }}
           LUCI_BOT_KEY_PEM: ${{ secrets.LUCI_BOT_KEY_PEM }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:LUCI_BOT_HOSTNAME)) { Write-Error "LUCI_BOT_HOSTNAME variable is required"; exit 1 }
           if ([string]::IsNullOrWhiteSpace($env:LUCI_BOT_CERT_PEM)) { Write-Error "LUCI_BOT_CERT_PEM variable is required"; exit 1 }
           if ([string]::IsNullOrWhiteSpace($env:LUCI_BOT_KEY_PEM)) { Write-Error "LUCI_BOT_KEY_PEM secret is required"; exit 1 }
 
