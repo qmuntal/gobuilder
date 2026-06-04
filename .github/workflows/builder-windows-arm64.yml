@@ -21,10 +21,13 @@ jobs:
       LLVM_MINGW_VERSION: "20250514"
       LLVM_MINGW_DIR: C:\llvm-mingw
       LLVM_MINGW_SHA256: d5b609a7f2857eac0c035e290a77012e177f58444f5cfa27c649d766c2d8c1d1
+      BOOTSTRAPSWARM_SHA256: b4c2320e709afb5a0613e4f10017acb86cd795287aaa7b70e39f3e5934a9384f
       LUCI_BOT_HOSTNAME_PREFIX: windows-arm64-azure-qmuntal
+      LUCI_MACHINE_TOKEND_SHA256: df1c5646ef5f9d41f2bd1e57ad0ba8acdb6e8d8c0dc70ee3cf382a7d60387697
       LUCI_MACHINE_TOKEN_BACKEND: luci-token-server.appspot.com
       LUCI_MACHINE_TOKEN: C:\golang\token.json
       LUCI_TOOL_ROOT: C:\golang
+      PYWIN32_VERSION: "312"
       SWARMING_HOME: C:\swarming-home
       SWARMING_USER: swarming
       SWARMING_WORKDIR: C:\b
@@ -33,6 +36,7 @@ jobs:
         shell: pwsh
     steps:
       - name: Set LUCI bot hostname
+        timeout-minutes: 2
         run: |
           $botIndex = "${{ inputs.bot_index }}".Trim()
           if ($botIndex -notmatch '^\d{2}$') {
@@ -50,15 +54,39 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "LUCI_BOT_HOSTNAME=$hostname"
           Write-Host "LUCI bot hostname: $hostname"
 
+      - name: Create verified download helper
+        timeout-minutes: 2
+        run: |
+          $scriptPath = Join-Path $env:RUNNER_TEMP "Save-VerifiedDownload.ps1"
+          @'
+          param(
+            [Parameter(Mandatory = $true)] [string] $Uri,
+            [Parameter(Mandatory = $true)] [string] $OutFile,
+            [Parameter(Mandatory = $true)] [string] $Sha256
+          )
+
+          $ErrorActionPreference = "Stop"
+          Write-Host "Downloading $Uri"
+          Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing
+          $actualHash = (Get-FileHash -Algorithm SHA256 -Path $OutFile).Hash.ToLowerInvariant()
+          $expectedHash = $Sha256.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) {
+            throw "$(Split-Path -Leaf $OutFile) SHA256 mismatch: got $actualHash, want $expectedHash"
+          }
+          '@ | Set-Content -Path $scriptPath -Encoding ASCII
+          Add-Content -Path $env:GITHUB_ENV -Value "VERIFIED_DOWNLOAD_SCRIPT=$scriptPath"
+
       - name: Cache llvm-mingw toolchain
         id: cache-llvm-mingw
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        timeout-minutes: 10
         with:
           path: ${{ env.LLVM_MINGW_DIR }}
           key: llvm-mingw-windows-arm64-${{ env.LLVM_MINGW_VERSION }}
 
       - name: Install llvm-mingw toolchain
         if: steps.cache-llvm-mingw.outputs.cache-hit != 'true'
+        timeout-minutes: 20
         run: |
           # Go's CGO on Windows expects a MinGW-compatible C toolchain.
           # The Azure startup.ps1 notes that LUCI builders get compilers
@@ -66,13 +94,7 @@ jobs:
           $archive = "llvm-mingw-$($env:LLVM_MINGW_VERSION)-ucrt-aarch64.zip"
           $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$($env:LLVM_MINGW_VERSION)/${archive}"
 
-          Write-Host "Downloading llvm-mingw from $url"
-          Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\$archive" -UseBasicParsing
-          $actualHash = (Get-FileHash -Algorithm SHA256 -Path "$env:TEMP\$archive").Hash.ToLowerInvariant()
-          if ($actualHash -ne $env:LLVM_MINGW_SHA256) {
-            Write-Error "llvm-mingw SHA256 mismatch: got $actualHash, want $env:LLVM_MINGW_SHA256"
-            exit 1
-          }
+          & $env:VERIFIED_DOWNLOAD_SCRIPT -Uri $url -OutFile "$env:TEMP\$archive" -Sha256 $env:LLVM_MINGW_SHA256
 
           Write-Host "Extracting to $env:LLVM_MINGW_DIR"
           Remove-Item -Recurse -Force $env:LLVM_MINGW_DIR -ErrorAction SilentlyContinue
@@ -80,6 +102,7 @@ jobs:
           Rename-Item "C:\llvm-mingw-$($env:LLVM_MINGW_VERSION)-ucrt-aarch64" $env:LLVM_MINGW_DIR
 
       - name: Add llvm-mingw to PATH
+        timeout-minutes: 2
         run: |
           $bin = Join-Path $env:LLVM_MINGW_DIR "bin"
           if (-not (Test-Path (Join-Path $bin "gcc.exe"))) {
@@ -96,6 +119,7 @@ jobs:
           Write-Host "Target: $(gcc -dumpmachine)"
 
       - name: Remove broken x86-64 tools
+        timeout-minutes: 5
         run: |
           # Several tools pre-installed on the runner (from Strawberry Perl,
           # Git-for-Windows, etc.) are x86-64 binaries that crash or
@@ -115,6 +139,7 @@ jobs:
 
       - name: Locate Python
         id: python
+        timeout-minutes: 2
         run: |
           $python = Get-Command python3 -ErrorAction SilentlyContinue
           if (-not $python) {
@@ -132,17 +157,19 @@ jobs:
           Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
 
       - name: Cache pip packages
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        timeout-minutes: 10
         with:
           path: ${{ env.PIP_CACHE_DIR }}
           key: pip-windows-arm64-${{ steps.python.outputs.version }}-pywin32
 
       - name: Install pywin32
+        timeout-minutes: 5
         run: |
-          & $env:PYTHON_EXE -m pip install --upgrade pip
-          & $env:PYTHON_EXE -m pip install pywin32
+          & $env:PYTHON_EXE -m pip install --disable-pip-version-check --only-binary=:all: "pywin32==$env:PYWIN32_VERSION"
 
       - name: Prepare swarming user
+        timeout-minutes: 5
         run: |
           $swarmingPassword = "G0b!" + [Guid]::NewGuid().ToString("N") + "Aa1!"
           Write-Output "::add-mask::$swarmingPassword"
@@ -173,13 +200,21 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_PASSWORD=$swarmingPassword"
 
       - name: Install LUCI builder tools
+        timeout-minutes: 5
         run: |
           New-Item -ItemType Directory -Force -Path $env:LUCI_TOOL_ROOT | Out-Null
-          curl.exe -sSL -o (Join-Path $env:LUCI_TOOL_ROOT "luci_machine_tokend.exe") "https://storage.googleapis.com/go-builder-data/windows-arm64-luci_machine_tokend.exe"
-          curl.exe -sSL -o (Join-Path $env:LUCI_TOOL_ROOT "bootstrapswarm.exe") "https://storage.googleapis.com/go-builder-data/windows-arm64-bootstrapswarm.exe"
+          & $env:VERIFIED_DOWNLOAD_SCRIPT `
+            -Uri "https://storage.googleapis.com/go-builder-data/windows-arm64-luci_machine_tokend.exe" `
+            -OutFile (Join-Path $env:LUCI_TOOL_ROOT "luci_machine_tokend.exe") `
+            -Sha256 $env:LUCI_MACHINE_TOKEND_SHA256
+          & $env:VERIFIED_DOWNLOAD_SCRIPT `
+            -Uri "https://storage.googleapis.com/go-builder-data/windows-arm64-bootstrapswarm.exe" `
+            -OutFile (Join-Path $env:LUCI_TOOL_ROOT "bootstrapswarm.exe") `
+            -Sha256 $env:BOOTSTRAPSWARM_SHA256
           icacls $env:LUCI_TOOL_ROOT /grant "${env:SWARMING_USER}:(OI)(CI)RX"
 
       - name: Mint LUCI machine token
+        timeout-minutes: 5
         env:
           LUCI_BOT_CERT_PEM: ${{ vars.LUCI_BOT_CERT_PEM }}
           LUCI_BOT_KEY_PEM: ${{ secrets.LUCI_BOT_KEY_PEM }}
@@ -217,6 +252,8 @@ jobs:
           icacls $env:LUCI_MACHINE_TOKEN /grant "${env:SWARMING_USER}:R"
 
       - name: Register LUCI builder
+        # The minted LUCI machine token is valid for 60 minutes, so increasing
+        # this timeout would not extend the usable bot lifetime.
         timeout-minutes: 60
         run: |
           $swarmingTemp = Join-Path $env:SWARMING_HOME "temp"

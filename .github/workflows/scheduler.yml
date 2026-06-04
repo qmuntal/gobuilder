@@ -7,10 +7,12 @@ on:
     inputs:
       max_jobs:
         description: Maximum active builder slots
+        type: number
         required: false
         default: 5
       builder_name:
         description: Only count queued LUCI builders whose name contains this value
+        type: string
         required: false
         default: windows-arm64
 
@@ -25,29 +27,36 @@ concurrency:
 jobs:
   schedule:
     runs-on: ubuntu-latest
+    env:
+      BUILDER_NAME: ${{ inputs.builder_name || 'windows-arm64' }}
+      MAX_JOBS: ${{ inputs.max_jobs || 5 }}
     steps:
       - name: Check out scheduler
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        timeout-minutes: 5
         with:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        timeout-minutes: 10
         with:
           go-version-file: go.mod
           cache: true
           cache-dependency-path: go.mod
 
       - name: Build scheduler
+        timeout-minutes: 5
         run: go build -o scheduler ./cmd/scheduler
 
       - name: Dispatch builder jobs
+        timeout-minutes: 10
         run: >
           ./scheduler
           --github-api-url "${{ github.api_url }}"
           --github-token "${{ github.token }}"
           --repository "${{ github.repository }}"
           --ref "${{ github.ref_name }}"
-          --workflow "builder-${{ inputs.builder_name }}.yml"
-          --buildbucket-builder-name "${{ inputs.builder_name }}"
-          --max-jobs "${{ inputs.max_jobs }}"
+          --workflow "builder-${{ env.BUILDER_NAME }}.yml"
+          --buildbucket-builder-name "${{ env.BUILDER_NAME }}"
+          --max-jobs "${{ env.MAX_JOBS }}"

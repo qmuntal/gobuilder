@@ -21,7 +21,10 @@ type WorkflowRunCounter interface {
 	ActiveWorkflowRuns(ctx context.Context, workflow string) (githubactions.ActiveWorkflowRuns, error)
 }
 
-const botIndexInput = "bot_index"
+const (
+	botIndexInput = "bot_index"
+	maxBotIndex   = 99
+)
 
 type Config struct {
 	Queue      JobQueue
@@ -44,6 +47,9 @@ func Run(ctx context.Context, config Config) (Result, error) {
 	}
 	if config.MaxJobs < 0 {
 		return Result{}, fmt.Errorf("max jobs must be zero or greater")
+	}
+	if config.MaxJobs > maxBotIndex {
+		return Result{}, fmt.Errorf("max jobs must be %d or less", maxBotIndex)
 	}
 
 	queueDepth, err := config.Queue.JobsInQueue(ctx)

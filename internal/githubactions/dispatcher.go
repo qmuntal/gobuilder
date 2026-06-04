@@ -13,7 +13,10 @@ import (
 	"time"
 )
 
-const DefaultAPIURL = "https://api.github.com"
+const (
+	DefaultAPIURL       = "https://api.github.com"
+	maxWorkflowRunPages = 100
+)
 
 type Dispatcher struct {
 	Token      string
@@ -37,13 +40,14 @@ type ActiveWorkflowRuns struct {
 }
 
 func (dispatcher Dispatcher) ActiveWorkflowRuns(ctx context.Context, workflow string) (ActiveWorkflowRuns, error) {
-	if strings.TrimSpace(workflow) == "" {
-		return ActiveWorkflowRuns{}, fmt.Errorf("workflow is required")
+	if err := validateWorkflow(workflow); err != nil {
+		return ActiveWorkflowRuns{}, err
 	}
 	if strings.TrimSpace(dispatcher.Token) == "" {
 		return ActiveWorkflowRuns{}, fmt.Errorf("github token is required")
 	}
 
+	workflow = strings.TrimSpace(workflow)
 	targetRunNamePrefix := workflowRunNamePrefix(workflow)
 	activeRuns := ActiveWorkflowRuns{BotIndexes: map[int]int{}}
 	for _, status := range activeWorkflowRunStatuses {
@@ -82,9 +86,9 @@ func (dispatcher Dispatcher) workflowRuns(ctx context.Context, workflow, status 
 		return workflowRunsResponse{}, err
 	}
 
-	apiURL := strings.TrimRight(dispatcher.APIURL, "/")
-	if apiURL == "" {
-		apiURL = DefaultAPIURL
+	apiURL, err := apiBaseURL(dispatcher.APIURL)
+	if err != nil {
+		return workflowRunsResponse{}, err
 	}
 
 	requestURL := fmt.Sprintf(
@@ -95,7 +99,7 @@ func (dispatcher Dispatcher) workflowRuns(ctx context.Context, workflow, status 
 		url.PathEscape(workflow),
 	)
 	var allRuns workflowRunsResponse
-	for page := 1; ; page++ {
+	for page := 1; page <= maxWorkflowRunPages; page++ {
 		query := url.Values{}
 		query.Set("status", status)
 		query.Set("per_page", "100")
@@ -113,6 +117,7 @@ func (dispatcher Dispatcher) workflowRuns(ctx context.Context, workflow, status 
 			return allRuns, nil
 		}
 	}
+	return workflowRunsResponse{}, fmt.Errorf("github workflow runs query exceeded %d pages", maxWorkflowRunPages)
 }
 
 func (dispatcher Dispatcher) workflowRunsPage(ctx context.Context, requestURL string) (workflowRunsResponse, error) {
@@ -186,8 +191,8 @@ func (dispatcher Dispatcher) DispatchWorkflow(ctx context.Context, dispatchReque
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(dispatchRequest.Workflow) == "" {
-		return fmt.Errorf("workflow is required")
+	if err := validateWorkflow(dispatchRequest.Workflow); err != nil {
+		return err
 	}
 	if strings.TrimSpace(dispatcher.Ref) == "" {
 		return fmt.Errorf("ref is required")
@@ -196,6 +201,7 @@ func (dispatcher Dispatcher) DispatchWorkflow(ctx context.Context, dispatchReque
 		return fmt.Errorf("github token is required")
 	}
 
+	workflow := strings.TrimSpace(dispatchRequest.Workflow)
 	payloadBody, err := json.Marshal(struct {
 		Ref    string            `json:"ref"`
 		Inputs map[string]string `json:"inputs,omitempty"`
@@ -207,9 +213,9 @@ func (dispatcher Dispatcher) DispatchWorkflow(ctx context.Context, dispatchReque
 		return fmt.Errorf("encode workflow dispatch payload: %w", err)
 	}
 
-	apiURL := strings.TrimRight(dispatcher.APIURL, "/")
-	if apiURL == "" {
-		apiURL = DefaultAPIURL
+	apiURL, err := apiBaseURL(dispatcher.APIURL)
+	if err != nil {
+		return err
 	}
 
 	requestURL := fmt.Sprintf(
@@ -217,7 +223,7 @@ func (dispatcher Dispatcher) DispatchWorkflow(ctx context.Context, dispatchReque
 		apiURL,
 		url.PathEscape(owner),
 		url.PathEscape(repositoryName),
-		url.PathEscape(dispatchRequest.Workflow),
+		url.PathEscape(workflow),
 	)
 
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(payloadBody))
@@ -249,6 +255,51 @@ func (dispatcher Dispatcher) DispatchWorkflow(ctx context.Context, dispatchReque
 	}
 
 	return nil
+}
+
+func validateWorkflow(workflow string) error {
+	workflow = strings.TrimSpace(workflow)
+	if workflow == "" {
+		return fmt.Errorf("workflow is required")
+	}
+	if len(workflow) > 128 {
+		return fmt.Errorf("workflow is too long")
+	}
+	for _, character := range workflow {
+		switch {
+		case character >= 'a' && character <= 'z':
+		case character >= 'A' && character <= 'Z':
+		case character >= '0' && character <= '9':
+		case character == '.', character == '_', character == '-':
+		default:
+			return fmt.Errorf("workflow must contain only letters, digits, '.', '_' or '-'")
+		}
+	}
+	return nil
+}
+
+func apiBaseURL(rawAPIURL string) (string, error) {
+	rawAPIURL = strings.TrimSpace(rawAPIURL)
+	if rawAPIURL == "" {
+		rawAPIURL = DefaultAPIURL
+	}
+	parsedURL, err := url.Parse(rawAPIURL)
+	if err != nil {
+		return "", fmt.Errorf("parse github api url: %w", err)
+	}
+	if parsedURL.Scheme != "https" && parsedURL.Scheme != "http" {
+		return "", fmt.Errorf("github api url must use http or https")
+	}
+	if parsedURL.Host == "" {
+		return "", fmt.Errorf("github api url must include a host")
+	}
+	if parsedURL.User != nil {
+		return "", fmt.Errorf("github api url must not include user info")
+	}
+	if parsedURL.RawQuery != "" || parsedURL.Fragment != "" {
+		return "", fmt.Errorf("github api url must not include query or fragment")
+	}
+	return strings.TrimRight(parsedURL.String(), "/"), nil
 }
 
 func (dispatcher Dispatcher) setGitHubHeaders(httpRequest *http.Request) {

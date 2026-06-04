@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -35,9 +36,9 @@ type Queue struct {
 }
 
 func NewQueue(config QueueConfig) (Queue, error) {
-	baseURL := strings.TrimRight(strings.TrimSpace(config.BaseURL), "/")
-	if baseURL == "" {
-		baseURL = DefaultURL
+	baseURL, err := normalizeBaseURL(config.BaseURL)
+	if err != nil {
+		return Queue{}, err
 	}
 
 	project := strings.TrimSpace(config.Project)
@@ -58,6 +59,30 @@ func NewQueue(config QueueConfig) (Queue, error) {
 		builderName: strings.TrimSpace(config.BuilderName),
 		httpClient:  httpClient,
 	}, nil
+}
+
+func normalizeBaseURL(rawBaseURL string) (string, error) {
+	rawBaseURL = strings.TrimSpace(rawBaseURL)
+	if rawBaseURL == "" {
+		rawBaseURL = DefaultURL
+	}
+	parsedURL, err := url.Parse(rawBaseURL)
+	if err != nil {
+		return "", fmt.Errorf("parse buildbucket url: %w", err)
+	}
+	if parsedURL.Scheme != "https" && parsedURL.Scheme != "http" {
+		return "", fmt.Errorf("buildbucket url must use http or https")
+	}
+	if parsedURL.Host == "" {
+		return "", fmt.Errorf("buildbucket url must include a host")
+	}
+	if parsedURL.User != nil {
+		return "", fmt.Errorf("buildbucket url must not include user info")
+	}
+	if parsedURL.RawQuery != "" || parsedURL.Fragment != "" {
+		return "", fmt.Errorf("buildbucket url must not include query or fragment")
+	}
+	return strings.TrimRight(parsedURL.String(), "/"), nil
 }
 
 func (queue Queue) JobsInQueue(ctx context.Context) (int, error) {

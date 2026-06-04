@@ -99,3 +99,13 @@ func TestQueueRequiresProject(testingContext *testing.T) {
 		testingContext.Fatal("NewQueue() error = nil, want error")
 	}
 }
+
+func TestQueueRejectsInvalidBaseURL(testingContext *testing.T) {
+	_, err := NewQueue(QueueConfig{
+		BaseURL: "https://token@example.test",
+		Project: "golang",
+	})
+	if err == nil {
+		testingContext.Fatal("NewQueue() error = nil, want error")
+	}
+}

@@ -23,6 +23,8 @@ Before dispatching, the scheduler counts active `builder-windows-arm64` workflow
 
 Manual `builder-windows-arm64` workflow dispatches default to slot `99`; scheduler-dispatched runs use the first free slot in the configured active range.
 
+Design details are documented in [DESIGN.md](DESIGN.md). Security hardening details are documented in [DESIGN-SECURITY.MD](DESIGN-SECURITY.MD).
+
 ## LUCI builder setup
 
 The `builder-windows-arm64` workflow follows the Go dashboard builder setup by minting a LUCI machine token with `luci_machine_tokend` and starting the Swarming bot with `bootstrapswarm`. Before it can work, the builder must be approved and defined by the Go team in LUCI.

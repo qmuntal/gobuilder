@@ -253,6 +253,16 @@ func TestRunDryRunDoesNotRequireDispatcher(testingContext *testing.T) {
 	}
 }
 
+func TestRunRejectsMaxJobsOutsideBotIndexRange(testingContext *testing.T) {
+	_, err := Run(context.Background(), Config{
+		Queue:   fakeJobQueue{jobs: 1},
+		MaxJobs: 100,
+	})
+	if err == nil {
+		testingContext.Fatal("Run() error = nil, want error")
+	}
+}
+
 func TestRunDispatchesInParallel(testingContext *testing.T) {
 	started := make(chan struct{}, 2)
 	release := make(chan struct{})

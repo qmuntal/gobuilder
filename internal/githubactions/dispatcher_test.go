@@ -65,6 +65,30 @@ func TestDispatchWorkflowRequiresToken(testingContext *testing.T) {
 	}
 }
 
+func TestDispatchWorkflowRejectsUnsafeWorkflow(testingContext *testing.T) {
+	dispatcher := Dispatcher{Token: "token", APIURL: "https://example.test", Repository: "owner/repo", Ref: "main"}
+	err := dispatcher.DispatchWorkflow(context.Background(), DispatchRequest{Workflow: "../builder.yml"})
+	if err == nil {
+		testingContext.Fatal("DispatchWorkflow() error = nil, want error")
+	}
+}
+
+func TestDispatchWorkflowRejectsInvalidAPIURL(testingContext *testing.T) {
+	dispatcher := Dispatcher{Token: "token", APIURL: "https://token@example.test", Repository: "owner/repo", Ref: "main"}
+	err := dispatcher.DispatchWorkflow(context.Background(), DispatchRequest{Workflow: "builder.yml"})
+	if err == nil {
+		testingContext.Fatal("DispatchWorkflow() error = nil, want error")
+	}
+}
+
+func TestActiveWorkflowRunsRejectsUnsafeWorkflow(testingContext *testing.T) {
+	dispatcher := Dispatcher{Token: "token", APIURL: "https://example.test", Repository: "owner/repo"}
+	_, err := dispatcher.ActiveWorkflowRuns(context.Background(), "builder/windows-arm64.yml")
+	if err == nil {
+		testingContext.Fatal("ActiveWorkflowRuns() error = nil, want error")
+	}
+}
+
 func TestActiveWorkflowRunsCountsActiveStatuses(testingContext *testing.T) {
 	requestedStatuses := map[string]bool{}
 	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {

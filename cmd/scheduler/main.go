@@ -80,7 +80,7 @@ func parseOptions(args []string) (options, error) {
 	}
 
 	flags := flag.NewFlagSet("scheduler", flag.ContinueOnError)
-	flags.Var(optionalInt{value: &parsedOptions.maxJobs}, "max-jobs", "maximum builder workflow runs to start")
+	flags.Var(optionalInt{value: &parsedOptions.maxJobs}, "max-jobs", "maximum active builder workflow slots")
 	flags.BoolVar(&parsedOptions.dryRun, "dry-run", parsedOptions.dryRun, "print dispatch count without starting builder workflows")
 	flags.StringVar(&parsedOptions.githubAPIURL, "github-api-url", parsedOptions.githubAPIURL, "GitHub API base URL")
 	flags.StringVar(&parsedOptions.githubToken, "github-token", parsedOptions.githubToken, "GitHub token used to dispatch builder workflows")

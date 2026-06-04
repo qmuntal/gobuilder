@@ -1,0 +1,58 @@
+name: verify-dependency-pins
+
+on:
+  pull_request:
+    paths:
+      - .github/requirements-builder-windows-arm64.txt
+      - .github/workflows/builder-windows-arm64.yml
+      - .github/workflows/verify-dependency-pins.yml
+
+permissions:
+  contents: read
+
+jobs:
+  pywin32:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        timeout-minutes: 5
+        with:
+          persist-credentials: false
+
+      - name: Verify pywin32 pin sync
+        timeout-minutes: 2
+        run: |
+          python - <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          requirements_path = pathlib.Path('.github/requirements-builder-windows-arm64.txt')
+          workflow_path = pathlib.Path('.github/workflows/builder-windows-arm64.yml')
+
+          requirements = requirements_path.read_text(encoding='utf-8')
+          workflow = workflow_path.read_text(encoding='utf-8')
+
+          requirements_match = re.search(r'(?m)^pywin32==([0-9]+)\s*$', requirements)
+          workflow_match = re.search(r'(?m)^\s*PYWIN32_VERSION:\s*"?([0-9]+)"?\s*$', workflow)
+
+          if not requirements_match:
+              print(f'::error file={requirements_path}::missing pywin32==VERSION pin')
+              sys.exit(1)
+          if not workflow_match:
+              print(f'::error file={workflow_path}::missing PYWIN32_VERSION workflow env')
+              sys.exit(1)
+
+          requirements_version = requirements_match.group(1)
+          workflow_version = workflow_match.group(1)
+          if requirements_version != workflow_version:
+              print(
+                  f'::error file={workflow_path}::PYWIN32_VERSION={workflow_version} '
+                  f'must match {requirements_path} pywin32=={requirements_version}'
+              )
+              sys.exit(1)
+
+          print(f'pywin32 pin is synchronized at {workflow_version}')
+          PY
