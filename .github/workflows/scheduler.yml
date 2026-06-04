@@ -48,6 +48,6 @@ jobs:
           --github-token "${{ github.token }}"
           --repository "${{ github.repository }}"
           --ref "${{ github.ref_name }}"
-          --workflow "builder.yml"
+          --workflow "builder-${{ inputs.builder_name }}.yml"
           --buildbucket-builder-name "${{ inputs.builder_name }}"
           --max-jobs "${{ inputs.max_jobs }}"

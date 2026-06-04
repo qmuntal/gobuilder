@@ -72,7 +72,6 @@ type options struct {
 func parseOptions(args []string) (options, error) {
 	parsedOptions := options{
 		maxJobs:            5,
-		workflow:           "builder.yml",
 		githubAPIURL:       githubactions.DefaultAPIURL,
 		buildbucketURL:     buildbucket.DefaultURL,
 		buildbucketProject: "golang",
@@ -86,7 +85,7 @@ func parseOptions(args []string) (options, error) {
 	flags.StringVar(&parsedOptions.githubToken, "github-token", parsedOptions.githubToken, "GitHub token used to dispatch builder workflows")
 	flags.StringVar(&parsedOptions.repository, "repository", parsedOptions.repository, "repository in owner/name format")
 	flags.StringVar(&parsedOptions.ref, "ref", parsedOptions.ref, "git ref used for builder workflow dispatches")
-	flags.Var(optionalString{value: &parsedOptions.workflow}, "workflow", "GitHub Actions workflow file or ID to dispatch")
+	flags.StringVar(&parsedOptions.workflow, "workflow", parsedOptions.workflow, "GitHub Actions workflow file or ID to dispatch")
 	flags.StringVar(&parsedOptions.buildbucketURL, "buildbucket-url", parsedOptions.buildbucketURL, "Buildbucket base URL")
 	flags.StringVar(&parsedOptions.buildbucketProject, "buildbucket-project", parsedOptions.buildbucketProject, "LUCI project to query")
 	flags.StringVar(&parsedOptions.buildbucketBucket, "buildbucket-bucket", parsedOptions.buildbucketBucket, "LUCI bucket to query")
@@ -98,6 +97,9 @@ func parseOptions(args []string) (options, error) {
 	}
 	if flags.NArg() > 0 {
 		return options{}, fmt.Errorf("unexpected arguments: %v", flags.Args())
+	}
+	if parsedOptions.workflow == "" {
+		return options{}, fmt.Errorf("workflow is required")
 	}
 
 	return parsedOptions, nil
@@ -126,24 +128,4 @@ func (option optionalInt) String() string {
 		return ""
 	}
 	return strconv.Itoa(*option.value)
-}
-
-type optionalString struct {
-	value *string
-}
-
-func (option optionalString) Set(rawValue string) error {
-	if rawValue == "" {
-		return nil
-	}
-
-	*option.value = rawValue
-	return nil
-}
-
-func (option optionalString) String() string {
-	if option.value == nil {
-		return ""
-	}
-	return *option.value
 }

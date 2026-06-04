@@ -1,0 +1,112 @@
+name: builder
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  luci:
+    runs-on: windows-11-arm
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Install llvm-mingw toolchain
+        run: |
+          # Go's CGO on Windows expects a MinGW-compatible C toolchain.
+          # The Azure startup.ps1 notes that LUCI builders get compilers
+          # via CIPD; for GitHub Actions we download llvm-mingw directly.
+          $version = "20250514"
+          $archive = "llvm-mingw-${version}-ucrt-aarch64.zip"
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/${version}/${archive}"
+          $dest = "C:\llvm-mingw"
+
+          Write-Host "Downloading llvm-mingw from $url"
+          Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\$archive" -UseBasicParsing
+          Write-Host "Extracting to $dest"
+          Remove-Item -Recurse -Force $dest -ErrorAction SilentlyContinue
+          Expand-Archive -Path "$env:TEMP\$archive" -DestinationPath "C:\"
+          Rename-Item "C:\llvm-mingw-${version}-ucrt-aarch64" $dest
+
+          # Put llvm-mingw at the front of PATH so its gcc/clang shadow
+          # the x86-64 MinGW gcc that ships with Git for Windows.
+          Add-Content -Path $env:GITHUB_PATH -Value "$dest\bin"
+          $env:PATH = "$dest\bin;$env:PATH"
+
+          Write-Host "CC: $(gcc --version 2>&1 | Select-Object -First 1)"
+          Write-Host "Target: $(gcc -dumpmachine)"
+
+      - name: Remove broken x86-64 tools
+        run: |
+          # Several tools pre-installed on the runner (from Strawberry Perl,
+          # Git-for-Windows, etc.) are x86-64 binaries that crash or
+          # misbehave under ARM64 emulation. Remove them so the Go test
+          # suite skips the dependent tests instead of failing.
+          foreach ($tool in @("gdb", "patch", "pkg-config")) {
+            $commands = @(Get-Command $tool -CommandType Application -All -ErrorAction SilentlyContinue)
+            if ($commands.Count -gt 0) {
+              foreach ($cmd in $commands) {
+                Write-Host "Removing $tool at $($cmd.Source)"
+                Remove-Item $cmd.Source -Force
+              }
+            } else {
+              Write-Host "$tool not found, nothing to remove"
+            }
+          }
+
+      - name: Install LUCI builder tools
+        run: |
+          $toolRoot = Join-Path $env:RUNNER_TEMP "luci-tools"
+          New-Item -ItemType Directory -Force -Path $toolRoot | Out-Null
+          curl.exe -sSL -o (Join-Path $toolRoot "luci_machine_tokend.exe") "https://storage.googleapis.com/go-builder-data/windows-arm64-luci_machine_tokend.exe"
+          curl.exe -sSL -o (Join-Path $toolRoot "bootstrapswarm.exe") "https://storage.googleapis.com/go-builder-data/windows-arm64-bootstrapswarm.exe"
+          Add-Content -Path $env:GITHUB_PATH -Value $toolRoot
+
+      - name: Mint LUCI machine token
+        env:
+          LUCI_BOT_HOSTNAME: ${{ vars.LUCI_BOT_HOSTNAME }}
+          LUCI_BOT_CERT_PEM: ${{ vars.LUCI_BOT_CERT_PEM }}
+          LUCI_BOT_KEY_PEM: ${{ secrets.LUCI_BOT_KEY_PEM }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:LUCI_BOT_HOSTNAME)) { Write-Error "LUCI_BOT_HOSTNAME variable is required"; exit 1 }
+          if ([string]::IsNullOrWhiteSpace($env:LUCI_BOT_CERT_PEM)) { Write-Error "LUCI_BOT_CERT_PEM variable is required"; exit 1 }
+          if ([string]::IsNullOrWhiteSpace($env:LUCI_BOT_KEY_PEM)) { Write-Error "LUCI_BOT_KEY_PEM secret is required"; exit 1 }
+
+          $luciRoot = Join-Path $env:RUNNER_TEMP "luci"
+          New-Item -ItemType Directory -Force -Path $luciRoot | Out-Null
+
+          $certFile = Join-Path $luciRoot "hostname.cert"
+          $keyFile = Join-Path $luciRoot "hostname.key"
+          $tokenFile = Join-Path $luciRoot "token.json"
+          $statusFile = Join-Path $luciRoot "token-status.json"
+
+          # GitHub variables/secrets may preserve real newlines or literal \n escapes; write normalized PEM files for tokend.
+          $certPem = $env:LUCI_BOT_CERT_PEM.Trim().Replace("\r\n", "`n").Replace("\n", "`n").Replace("`r`n", "`n").Replace("`r", "`n").Trim() + "`n"
+          $keyPem = $env:LUCI_BOT_KEY_PEM.Trim().Replace("\r\n", "`n").Replace("\n", "`n").Replace("`r`n", "`n").Replace("`r", "`n").Trim() + "`n"
+          [System.IO.File]::WriteAllText($certFile, $certPem, [System.Text.Encoding]::ASCII)
+          [System.IO.File]::WriteAllText($keyFile, $keyPem, [System.Text.Encoding]::ASCII)
+
+          $tokenExitCode = 0
+          try {
+            luci_machine_tokend `
+              -backend luci-token-server.appspot.com `
+              -cert-pem $certFile `
+              -pkey-pem $keyFile `
+              -token-file $tokenFile `
+              -status-file $statusFile `
+              -force-refresh
+            $tokenExitCode = $LASTEXITCODE
+          } finally {
+            Remove-Item -Path $certFile, $keyFile -Force -ErrorAction SilentlyContinue
+          }
+          if ($tokenExitCode -ne 0) {
+            exit $tokenExitCode
+          }
+
+          Add-Content -Path $env:GITHUB_ENV -Value "LUCI_BOT_HOSTNAME=$env:LUCI_BOT_HOSTNAME"
+          Add-Content -Path $env:GITHUB_ENV -Value "LUCI_MACHINE_TOKEN=$tokenFile"
+          Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_NEVER_REBOOT=true"
+
+      - name: Register LUCI builder
+        run: bootstrapswarm -hostname "$env:LUCI_BOT_HOSTNAME"

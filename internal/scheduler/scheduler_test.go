@@ -64,7 +64,7 @@ func TestRunCapsDispatchesAtMaximum(testingContext *testing.T) {
 		Queue:      fakeJobQueue{jobs: 5},
 		Dispatcher: dispatcher,
 		MaxJobs:    2,
-		Workflow:   "builder.yml",
+		Workflow:   "builder-windows-arm64.yml",
 		Output:     output,
 	})
 	if err != nil {
@@ -81,8 +81,8 @@ func TestRunCapsDispatchesAtMaximum(testingContext *testing.T) {
 		testingContext.Fatalf("dispatcher requests = %d, want 2", len(requests))
 	}
 	for requestIndex, request := range requests {
-		if request.Workflow != "builder.yml" {
-			testingContext.Fatalf("request %d workflow = %q, want builder.yml", requestIndex, request.Workflow)
+		if request.Workflow != "builder-windows-arm64.yml" {
+			testingContext.Fatalf("request %d workflow = %q, want builder-windows-arm64.yml", requestIndex, request.Workflow)
 		}
 		if len(request.Inputs) != 0 {
 			testingContext.Fatalf("request %d inputs = %v, want none", requestIndex, request.Inputs)
@@ -114,7 +114,7 @@ func TestRunDispatchesInParallel(testingContext *testing.T) {
 			Queue:      fakeJobQueue{jobs: 2},
 			Dispatcher: blockingDispatcher{started: started, release: release},
 			MaxJobs:    2,
-			Workflow:   "builder.yml",
+			Workflow:   "builder-windows-arm64.yml",
 		})
 		errChannel <- err
 	}()
