@@ -8,19 +8,30 @@ permissions: {}
 jobs:
   luci:
     runs-on: windows-11-arm
+    env:
+      LLVM_MINGW_VERSION: "20250514"
+      LLVM_MINGW_DIR: C:\llvm-mingw
     defaults:
       run:
         shell: pwsh
     steps:
+      - name: Cache llvm-mingw toolchain
+        id: cache-llvm-mingw
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.LLVM_MINGW_DIR }}
+          key: llvm-mingw-windows-arm64-${{ env.LLVM_MINGW_VERSION }}
+
       - name: Install llvm-mingw toolchain
+        if: steps.cache-llvm-mingw.outputs.cache-hit != 'true'
         run: |
           # Go's CGO on Windows expects a MinGW-compatible C toolchain.
           # The Azure startup.ps1 notes that LUCI builders get compilers
           # via CIPD; for GitHub Actions we download llvm-mingw directly.
-          $version = "20250514"
+          $version = $env:LLVM_MINGW_VERSION
           $archive = "llvm-mingw-${version}-ucrt-aarch64.zip"
           $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/${version}/${archive}"
-          $dest = "C:\llvm-mingw"
+          $dest = $env:LLVM_MINGW_DIR
 
           Write-Host "Downloading llvm-mingw from $url"
           Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\$archive" -UseBasicParsing
@@ -29,10 +40,18 @@ jobs:
           Expand-Archive -Path "$env:TEMP\$archive" -DestinationPath "C:\"
           Rename-Item "C:\llvm-mingw-${version}-ucrt-aarch64" $dest
 
+      - name: Add llvm-mingw to PATH
+        run: |
+          $bin = Join-Path $env:LLVM_MINGW_DIR "bin"
+          if (-not (Test-Path (Join-Path $bin "gcc.exe"))) {
+            Write-Error "llvm-mingw gcc.exe not found in $bin"
+            exit 1
+          }
+
           # Put llvm-mingw at the front of PATH so its gcc/clang shadow
           # the x86-64 MinGW gcc that ships with Git for Windows.
-          Add-Content -Path $env:GITHUB_PATH -Value "$dest\bin"
-          $env:PATH = "$dest\bin;$env:PATH"
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+          $env:PATH = "$bin;$env:PATH"
 
           Write-Host "CC: $(gcc --version 2>&1 | Select-Object -First 1)"
           Write-Host "Target: $(gcc -dumpmachine)"
@@ -54,6 +73,20 @@ jobs:
               Write-Host "$tool not found, nothing to remove"
             }
           }
+
+      - name: Install pywin32
+        run: |
+          $python = Get-Command python3 -ErrorAction SilentlyContinue
+          if (-not $python) {
+            $python = Get-Command python -ErrorAction SilentlyContinue
+          }
+          if (-not $python) {
+            Write-Error "python or python3 is required for bootstrapswarm"
+            exit 1
+          }
+
+          & $python.Source -m pip install --upgrade pip
+          & $python.Source -m pip install pywin32
 
       - name: Install LUCI builder tools
         run: |
