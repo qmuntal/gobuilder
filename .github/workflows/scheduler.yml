@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       max_jobs:
-        description: Maximum builder runs to start
+        description: Maximum active builder slots
         required: false
         default: 5
       builder_name:

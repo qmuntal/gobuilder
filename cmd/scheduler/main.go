@@ -46,6 +46,7 @@ func run() error {
 	_, err = scheduler.Run(context.Background(), scheduler.Config{
 		Queue:      jobQueue,
 		Dispatcher: workflowDispatcher,
+		RunCounter: workflowDispatcher,
 		MaxJobs:    options.maxJobs,
 		Workflow:   options.workflow,
 		DryRun:     options.dryRun,

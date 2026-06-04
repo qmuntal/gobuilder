@@ -1,21 +1,48 @@
 name: builder
+run-name: builder-windows-arm64 bot ${{ inputs.bot_index }}
 
 on:
   workflow_dispatch:
+    inputs:
+      bot_index:
+        description: Two-digit stable LUCI bot slot index
+        required: false
+        default: "99"
 
 permissions: {}
 
 jobs:
   luci:
     runs-on: windows-11-arm
+    concurrency:
+      group: builder-windows-arm64-${{ inputs.bot_index }}
+      cancel-in-progress: false
     env:
       LLVM_MINGW_VERSION: "20250514"
       LLVM_MINGW_DIR: C:\llvm-mingw
-      LUCI_BOT_HOSTNAME: windows-arm64-azure-qmuntal--03
+      LUCI_BOT_HOSTNAME_PREFIX: windows-arm64-azure-qmuntal
     defaults:
       run:
         shell: pwsh
     steps:
+      - name: Set LUCI bot hostname
+        run: |
+          $botIndex = "${{ inputs.bot_index }}".Trim()
+          if ($botIndex -notmatch '^\d{2}$') {
+            Write-Error "bot_index must be exactly two digits, got '$botIndex'"
+            exit 1
+          }
+
+          $botIndexNumber = [int]$botIndex
+          if ($botIndexNumber -lt 1) {
+            Write-Error "bot_index must be greater than zero, got '$botIndex'"
+            exit 1
+          }
+
+          $hostname = "$env:LUCI_BOT_HOSTNAME_PREFIX--$botIndex"
+          Add-Content -Path $env:GITHUB_ENV -Value "LUCI_BOT_HOSTNAME=$hostname"
+          Write-Host "LUCI bot hostname: $hostname"
+
       - name: Cache llvm-mingw toolchain
         id: cache-llvm-mingw
         uses: actions/cache@v5
@@ -179,6 +206,8 @@ jobs:
               -pkey-pem $keyFile `
               -token-file $tokenFile `
               -status-file $statusFile `
+              -ts-mon-task-hostname $env:LUCI_BOT_HOSTNAME `
+              -ts-mon-autogen-hostname `
               -force-refresh
             $tokenExitCode = $LASTEXITCODE
           } finally {
