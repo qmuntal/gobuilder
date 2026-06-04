@@ -2,7 +2,7 @@ name: scheduler
 
 on:
   schedule:
-    - cron: "*/3 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       max_jobs:
