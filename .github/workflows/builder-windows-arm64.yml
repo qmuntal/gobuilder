@@ -223,6 +223,7 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "LUCI_MACHINE_TOKEN=$tokenFile"
 
       - name: Register LUCI builder
+        timeout-minutes: 60
         run: |
           $swarmingTemp = Join-Path $env:SWARMING_HOME "temp"
           New-Item -ItemType Directory -Force -Path $swarmingTemp | Out-Null
