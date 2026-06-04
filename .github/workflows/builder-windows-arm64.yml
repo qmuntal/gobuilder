@@ -262,15 +262,19 @@ jobs:
             $writer = [System.IO.StreamWriter]::new($entry.Open(), [System.Text.UTF8Encoding]::new($false))
             try {
               $writer.Write($botConfig)
-              $writer.Write(@'
-# Injected by qmuntal/gobuilder: retire this ephemeral GitHub Actions bot after one task.
-def on_after_task(bot, failure, internal_failure, task_dimensions, summary):
-  import sys
-  try:
-    bot.post_event('bot_shutdown', 'GitHub Actions builder completed one task; exiting')
-  finally:
-    sys.exit(0)
-'@)
+              $oneShotHook = @(
+                "",
+                "",
+                "# Injected by qmuntal/gobuilder: retire this ephemeral GitHub Actions bot after one task.",
+                "def on_after_task(bot, failure, internal_failure, task_dimensions, summary):",
+                "  import sys",
+                "  try:",
+                "    bot.post_event('bot_shutdown', 'GitHub Actions builder completed one task; exiting')",
+                "  finally:",
+                "    sys.exit(0)",
+                ""
+              ) -join "`n"
+              $writer.Write($oneShotHook)
             } finally {
               $writer.Dispose()
             }
