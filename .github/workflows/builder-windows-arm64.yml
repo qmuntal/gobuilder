@@ -1,4 +1,4 @@
-name: builder
+name: builder-windows-arm64
 run-name: builder-windows-arm64 bot ${{ inputs.bot_index }}
 
 on:
@@ -20,7 +20,14 @@ jobs:
     env:
       LLVM_MINGW_VERSION: "20250514"
       LLVM_MINGW_DIR: C:\llvm-mingw
+      LLVM_MINGW_SHA256: d5b609a7f2857eac0c035e290a77012e177f58444f5cfa27c649d766c2d8c1d1
       LUCI_BOT_HOSTNAME_PREFIX: windows-arm64-azure-qmuntal
+      LUCI_MACHINE_TOKEN_BACKEND: luci-token-server.appspot.com
+      LUCI_MACHINE_TOKEN: C:\golang\token.json
+      LUCI_TOOL_ROOT: C:\golang
+      SWARMING_HOME: C:\swarming-home
+      SWARMING_USER: swarming
+      SWARMING_WORKDIR: C:\b
     defaults:
       run:
         shell: pwsh
@@ -56,17 +63,21 @@ jobs:
           # Go's CGO on Windows expects a MinGW-compatible C toolchain.
           # The Azure startup.ps1 notes that LUCI builders get compilers
           # via CIPD; for GitHub Actions we download llvm-mingw directly.
-          $version = $env:LLVM_MINGW_VERSION
-          $archive = "llvm-mingw-${version}-ucrt-aarch64.zip"
-          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/${version}/${archive}"
-          $dest = $env:LLVM_MINGW_DIR
+          $archive = "llvm-mingw-$($env:LLVM_MINGW_VERSION)-ucrt-aarch64.zip"
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$($env:LLVM_MINGW_VERSION)/${archive}"
 
           Write-Host "Downloading llvm-mingw from $url"
           Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\$archive" -UseBasicParsing
-          Write-Host "Extracting to $dest"
-          Remove-Item -Recurse -Force $dest -ErrorAction SilentlyContinue
+          $actualHash = (Get-FileHash -Algorithm SHA256 -Path "$env:TEMP\$archive").Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:LLVM_MINGW_SHA256) {
+            Write-Error "llvm-mingw SHA256 mismatch: got $actualHash, want $env:LLVM_MINGW_SHA256"
+            exit 1
+          }
+
+          Write-Host "Extracting to $env:LLVM_MINGW_DIR"
+          Remove-Item -Recurse -Force $env:LLVM_MINGW_DIR -ErrorAction SilentlyContinue
           Expand-Archive -Path "$env:TEMP\$archive" -DestinationPath "C:\"
-          Rename-Item "C:\llvm-mingw-${version}-ucrt-aarch64" $dest
+          Rename-Item "C:\llvm-mingw-$($env:LLVM_MINGW_VERSION)-ucrt-aarch64" $env:LLVM_MINGW_DIR
 
       - name: Add llvm-mingw to PATH
         run: |
@@ -133,48 +144,40 @@ jobs:
 
       - name: Prepare swarming user
         run: |
-          $swarmingUser = "swarming"
           $swarmingPassword = "G0b!" + [Guid]::NewGuid().ToString("N") + "Aa1!"
           Write-Output "::add-mask::$swarmingPassword"
           $securePassword = ConvertTo-SecureString $swarmingPassword -AsPlainText -Force
 
-          if (-not (Get-LocalUser -Name $swarmingUser -ErrorAction SilentlyContinue)) {
-            Write-Host "Creating $swarmingUser user"
-            New-LocalUser -Name $swarmingUser -Password $securePassword -PasswordNeverExpires -AccountNeverExpires
+          if (-not (Get-LocalUser -Name $env:SWARMING_USER -ErrorAction SilentlyContinue)) {
+            Write-Host "Creating $env:SWARMING_USER user"
+            New-LocalUser -Name $env:SWARMING_USER -Password $securePassword -PasswordNeverExpires -AccountNeverExpires
           } else {
-            Write-Host "$swarmingUser user already exists"
-            Set-LocalUser -Name $swarmingUser -Password $securePassword -PasswordNeverExpires $true
+            Write-Host "$env:SWARMING_USER user already exists"
+            Set-LocalUser -Name $env:SWARMING_USER -Password $securePassword -PasswordNeverExpires $true
           }
 
           try {
-            Add-LocalGroupMember -Group "Administrators" -Member $swarmingUser -ErrorAction Stop
+            Add-LocalGroupMember -Group "Administrators" -Member $env:SWARMING_USER -ErrorAction Stop
           } catch [Microsoft.PowerShell.Commands.MemberExistsException] {
-            Write-Host "$swarmingUser is already in Administrators"
+            Write-Host "$env:SWARMING_USER is already in Administrators"
           }
 
-          $swarmingWorkDir = "C:\b"
-          $swarmingHomeDir = "C:\swarming-home"
-          New-Item -ItemType Directory -Force -Path $swarmingWorkDir | Out-Null
-          New-Item -ItemType Directory -Force -Path $swarmingHomeDir | Out-Null
-          New-Item -ItemType Directory -Force -Path (Join-Path $swarmingHomeDir "temp") | Out-Null
-          icacls $swarmingWorkDir /setowner $swarmingUser
-          icacls $swarmingWorkDir /grant "${swarmingUser}:(OI)(CI)F"
-          icacls $swarmingHomeDir /setowner $swarmingUser
-          icacls $swarmingHomeDir /grant "${swarmingUser}:(OI)(CI)F"
+          New-Item -ItemType Directory -Force -Path $env:SWARMING_WORKDIR | Out-Null
+          New-Item -ItemType Directory -Force -Path $env:SWARMING_HOME | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $env:SWARMING_HOME "temp") | Out-Null
+          icacls $env:SWARMING_WORKDIR /setowner $env:SWARMING_USER
+          icacls $env:SWARMING_WORKDIR /grant "${env:SWARMING_USER}:(OI)(CI)F"
+          icacls $env:SWARMING_HOME /setowner $env:SWARMING_USER
+          icacls $env:SWARMING_HOME /grant "${env:SWARMING_USER}:(OI)(CI)F"
 
-          Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_USER=$swarmingUser"
           Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_PASSWORD=$swarmingPassword"
-          Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_WORKDIR=$swarmingWorkDir"
-          Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_HOME=$swarmingHomeDir"
 
       - name: Install LUCI builder tools
         run: |
-          $toolRoot = "C:\golang"
-          New-Item -ItemType Directory -Force -Path $toolRoot | Out-Null
-          curl.exe -sSL -o (Join-Path $toolRoot "luci_machine_tokend.exe") "https://storage.googleapis.com/go-builder-data/windows-arm64-luci_machine_tokend.exe"
-          curl.exe -sSL -o (Join-Path $toolRoot "bootstrapswarm.exe") "https://storage.googleapis.com/go-builder-data/windows-arm64-bootstrapswarm.exe"
-          icacls $toolRoot /grant "${env:SWARMING_USER}:(OI)(CI)RX"
-          Add-Content -Path $env:GITHUB_PATH -Value $toolRoot
+          New-Item -ItemType Directory -Force -Path $env:LUCI_TOOL_ROOT | Out-Null
+          curl.exe -sSL -o (Join-Path $env:LUCI_TOOL_ROOT "luci_machine_tokend.exe") "https://storage.googleapis.com/go-builder-data/windows-arm64-luci_machine_tokend.exe"
+          curl.exe -sSL -o (Join-Path $env:LUCI_TOOL_ROOT "bootstrapswarm.exe") "https://storage.googleapis.com/go-builder-data/windows-arm64-bootstrapswarm.exe"
+          icacls $env:LUCI_TOOL_ROOT /grant "${env:SWARMING_USER}:(OI)(CI)RX"
 
       - name: Mint LUCI machine token
         env:
@@ -189,8 +192,6 @@ jobs:
 
           $certFile = Join-Path $luciRoot "hostname.cert"
           $keyFile = Join-Path $luciRoot "hostname.key"
-          $tokenFile = "C:\golang\token.json"
-          $statusFile = "C:\golang\token-status.json"
 
           # GitHub variables/secrets may preserve real newlines or literal \n escapes; write normalized PEM files for tokend.
           $certPem = $env:LUCI_BOT_CERT_PEM.Trim().Replace("\r\n", "`n").Replace("\n", "`n").Replace("`r`n", "`n").Replace("`r", "`n").Trim() + "`n"
@@ -200,15 +201,11 @@ jobs:
 
           $tokenExitCode = 0
           try {
-            luci_machine_tokend `
-              -backend luci-token-server.appspot.com `
+            & (Join-Path $env:LUCI_TOOL_ROOT "luci_machine_tokend.exe") `
+              -backend $env:LUCI_MACHINE_TOKEN_BACKEND `
               -cert-pem $certFile `
               -pkey-pem $keyFile `
-              -token-file $tokenFile `
-              -status-file $statusFile `
-              -ts-mon-task-hostname $env:LUCI_BOT_HOSTNAME `
-              -ts-mon-autogen-hostname `
-              -force-refresh
+              -token-file $env:LUCI_MACHINE_TOKEN
             $tokenExitCode = $LASTEXITCODE
           } finally {
             Remove-Item -Path $certFile, $keyFile -Force -ErrorAction SilentlyContinue
@@ -217,10 +214,7 @@ jobs:
             exit $tokenExitCode
           }
 
-          icacls $tokenFile /grant "${env:SWARMING_USER}:R"
-
-          Add-Content -Path $env:GITHUB_ENV -Value "LUCI_BOT_HOSTNAME=$env:LUCI_BOT_HOSTNAME"
-          Add-Content -Path $env:GITHUB_ENV -Value "LUCI_MACHINE_TOKEN=$tokenFile"
+          icacls $env:LUCI_MACHINE_TOKEN /grant "${env:SWARMING_USER}:R"
 
       - name: Register LUCI builder
         timeout-minutes: 60
@@ -235,11 +229,17 @@ jobs:
             USERNAME = $env:SWARMING_USER
             USER = $env:SWARMING_USER
             LOGNAME = $env:SWARMING_USER
-            SWARMING_NEVER_REBOOT = "true"
             LUCI_MACHINE_TOKEN = $env:LUCI_MACHINE_TOKEN
           }
 
           $securePassword = ConvertTo-SecureString $env:SWARMING_PASSWORD -AsPlainText -Force
           $credential = [System.Management.Automation.PSCredential]::new(".\$env:SWARMING_USER", $securePassword)
-          $process = Start-Process -FilePath "C:\golang\bootstrapswarm.exe" -ArgumentList @("-hostname", $env:LUCI_BOT_HOSTNAME) -Credential $credential -Environment $environment -WorkingDirectory $env:SWARMING_WORKDIR -Wait -PassThru
+          $process = Start-Process `
+            -FilePath (Join-Path $env:LUCI_TOOL_ROOT "bootstrapswarm.exe") `
+            -ArgumentList @("-hostname", $env:LUCI_BOT_HOSTNAME) `
+            -Credential $credential `
+            -Environment $environment `
+            -WorkingDirectory $env:SWARMING_WORKDIR `
+            -Wait `
+            -PassThru
           exit $process.ExitCode

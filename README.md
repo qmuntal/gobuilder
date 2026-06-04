@@ -5,13 +5,13 @@
 This repository has two workflows:
 
 - `scheduler` is declared with a 5-minute cron and can also be started manually. It runs the Go scheduler in `cmd/scheduler`. GitHub may delay or throttle scheduled workflows.
-- `builder` is started by the scheduler and starts a LUCI Swarming bot.
+- `builder-windows-arm64` is started by the scheduler and starts a LUCI Swarming bot.
 
-The `builder` workflow declares `permissions: {}` so the default `GITHUB_TOKEN` has no repository permissions. The `scheduler` workflow grants `contents: read` to check out the Go source and `actions: write` to dispatch `builder` in the same repository with the built-in token.
+The `builder-windows-arm64` workflow declares `permissions: {}` so the default `GITHUB_TOKEN` has no repository permissions. The `scheduler` workflow grants `contents: read` to check out the Go source and `actions: write` to dispatch the builder workflow in the same repository with the built-in token.
 
 The `scheduler` workflow uses a single GitHub Actions concurrency group, so overlapping scheduled or manual scheduler runs do not allocate builder slots at the same time.
 
-The scheduler counts queued Go LUCI builds by querying Buildbucket, the backend used by https://ci.chromium.org/ui/p/golang. It counts `SCHEDULED` builds in the `golang/ci` builder bucket, then starts up to the configured maximum number of `builder` workflow runs.
+The scheduler counts queued Go LUCI builds by querying Buildbucket, the backend used by https://ci.chromium.org/ui/p/golang. It counts `SCHEDULED` builds in the `golang/ci` builder bucket, then starts up to the configured maximum number of `builder-windows-arm64` workflow runs.
 
 - `--max-jobs`: maximum active builder workflow slots, default `5`
 - `--workflow`: required GitHub Actions workflow file or ID to dispatch
@@ -19,21 +19,19 @@ The scheduler counts queued Go LUCI builds by querying Buildbucket, the backend 
 - `--buildbucket-bucket`: LUCI bucket to query, default `ci`
 - `--buildbucket-builder-name`: optional builder-name substring to count; empty counts all builders
 
-Before dispatching, the scheduler counts active builder workflow runs in GitHub Actions and reads their stable `bot_index` slots from the workflow run name. It starts only the remaining capacity up to `--max-jobs` and passes each new workflow the first free two-digit slot. The builder workflow uses that index as the suffix of the LUCI composite bot ID, keeping the bot pages stable in the LUCI UI while still allowing multiple concurrent slots. If an active workflow run does not expose a parseable slot, the scheduler dispatches no new builders rather than risk reusing an occupied bot ID.
+Before dispatching, the scheduler counts active `builder-windows-arm64` workflow runs in GitHub Actions and reads their stable `bot_index` slots from the workflow run name. It starts only the remaining capacity up to `--max-jobs` and passes each new workflow the first free two-digit slot. The builder workflow uses that index as the suffix of the LUCI composite bot ID, keeping the bot pages stable in the LUCI UI while still allowing multiple concurrent slots. If an active workflow run does not expose a parseable slot, the scheduler dispatches no new builders rather than risk reusing an occupied bot ID.
 
-Manual `builder` workflow dispatches default to slot `99`; scheduler-dispatched runs use the first free slot in the configured active range.
+Manual `builder-windows-arm64` workflow dispatches default to slot `99`; scheduler-dispatched runs use the first free slot in the configured active range.
 
 ## LUCI builder setup
 
-The `builder` workflow follows the Go dashboard builder setup by minting a LUCI machine token with `luci_machine_tokend` and starting the Swarming bot with `bootstrapswarm`. Before it can work, the builder must be approved and defined by the Go team in LUCI.
+The `builder-windows-arm64` workflow follows the Go dashboard builder setup by minting a LUCI machine token with `luci_machine_tokend` and starting the Swarming bot with `bootstrapswarm`. Before it can work, the builder must be approved and defined by the Go team in LUCI.
 
-The `builder` workflow runs on a Windows ARM64 runner. It downloads `luci_machine_tokend.exe` and `bootstrapswarm.exe` from `go-builder-data`, matching the Azure Windows ARM64 setup in `golang/build`. The Swarming bot handles CIPD-managed payloads after it starts.
+The `builder-windows-arm64` workflow runs on a Windows ARM64 runner. It downloads `luci_machine_tokend.exe` and `bootstrapswarm.exe` from `go-builder-data`, matching the Azure Windows ARM64 setup in `golang/build`. The Swarming bot handles CIPD-managed payloads after it starts.
 
 The certificate and private key are only used while minting `token.json`; the workflow deletes those PEM files before starting `bootstrapswarm`. `bootstrapswarm` runs as the local `swarming` user and receives only the `LUCI_MACHINE_TOKEN` path, matching the Azure setup where the token file is read by the Swarming bot.
 
 The workflow registers each GitHub Actions run as a LUCI composite bot ID of the form `windows-arm64-azure-qmuntal--NN`, where `NN` is the stable `bot_index` slot. LUCI Swarming uses the suffix after `--` as the bot slot identifier, while the host identity used for bot auth and bot group lookup is the base `windows-arm64-azure-qmuntal`. The LUCI bot certificate and bots.cfg entry should therefore be issued/configured for the base hostname, not for a single suffixed slot.
-
-`luci_machine_tokend` receives `-ts-mon-autogen-hostname` and `-ts-mon-task-hostname` so LUCI monitoring treats the logical bot hostname as autogenerated. This is a monitoring hint; the Swarming bot identity still comes from `bootstrapswarm -hostname`.
 
 Required repository variables:
 
