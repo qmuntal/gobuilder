@@ -88,12 +88,40 @@ jobs:
           & $python.Source -m pip install --upgrade pip
           & $python.Source -m pip install pywin32
 
+      - name: Prepare swarming user
+        run: |
+          $swarmingUser = "swarming"
+          $swarmingPassword = "G0b!" + [Guid]::NewGuid().ToString("N") + "Aa1!"
+          Write-Output "::add-mask::$swarmingPassword"
+
+          if (-not (Get-LocalUser -Name $swarmingUser -ErrorAction SilentlyContinue)) {
+            Write-Host "Creating $swarmingUser user"
+            net user $swarmingUser $swarmingPassword /ADD
+          } else {
+            Write-Host "$swarmingUser user already exists"
+            net user $swarmingUser $swarmingPassword
+          }
+
+          net localgroup administrators $swarmingUser /ADD
+          Set-LocalUser -Name $swarmingUser -PasswordNeverExpires $true
+
+          $swarmingWorkDir = "C:\b"
+          New-Item -ItemType Directory -Force -Path $swarmingWorkDir | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $swarmingWorkDir "temp") | Out-Null
+          icacls $swarmingWorkDir /setowner $swarmingUser
+          icacls $swarmingWorkDir /grant "${swarmingUser}:(OI)(CI)F"
+
+          Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_USER=$swarmingUser"
+          Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_PASSWORD=$swarmingPassword"
+          Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_WORKDIR=$swarmingWorkDir"
+
       - name: Install LUCI builder tools
         run: |
-          $toolRoot = Join-Path $env:RUNNER_TEMP "luci-tools"
+          $toolRoot = "C:\golang"
           New-Item -ItemType Directory -Force -Path $toolRoot | Out-Null
           curl.exe -sSL -o (Join-Path $toolRoot "luci_machine_tokend.exe") "https://storage.googleapis.com/go-builder-data/windows-arm64-luci_machine_tokend.exe"
           curl.exe -sSL -o (Join-Path $toolRoot "bootstrapswarm.exe") "https://storage.googleapis.com/go-builder-data/windows-arm64-bootstrapswarm.exe"
+          icacls $toolRoot /grant "${env:SWARMING_USER}:(OI)(CI)RX"
           Add-Content -Path $env:GITHUB_PATH -Value $toolRoot
 
       - name: Mint LUCI machine token
@@ -111,8 +139,8 @@ jobs:
 
           $certFile = Join-Path $luciRoot "hostname.cert"
           $keyFile = Join-Path $luciRoot "hostname.key"
-          $tokenFile = Join-Path $luciRoot "token.json"
-          $statusFile = Join-Path $luciRoot "token-status.json"
+          $tokenFile = "C:\golang\token.json"
+          $statusFile = "C:\golang\token-status.json"
 
           # GitHub variables/secrets may preserve real newlines or literal \n escapes; write normalized PEM files for tokend.
           $certPem = $env:LUCI_BOT_CERT_PEM.Trim().Replace("\r\n", "`n").Replace("\n", "`n").Replace("`r`n", "`n").Replace("`r", "`n").Trim() + "`n"
@@ -137,9 +165,26 @@ jobs:
             exit $tokenExitCode
           }
 
+          icacls $tokenFile /grant "${env:SWARMING_USER}:R"
+
           Add-Content -Path $env:GITHUB_ENV -Value "LUCI_BOT_HOSTNAME=$env:LUCI_BOT_HOSTNAME"
           Add-Content -Path $env:GITHUB_ENV -Value "LUCI_MACHINE_TOKEN=$tokenFile"
           Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_NEVER_REBOOT=true"
 
       - name: Register LUCI builder
-        run: bootstrapswarm -hostname "$env:LUCI_BOT_HOSTNAME"
+        run: |
+          $swarmingTemp = Join-Path $env:SWARMING_WORKDIR "temp"
+          New-Item -ItemType Directory -Force -Path $swarmingTemp | Out-Null
+          $env:TEMP = $swarmingTemp
+          $env:TMP = $swarmingTemp
+          $env:SWARMING_NEVER_REBOOT = "true"
+
+          $stdout = Join-Path $env:SWARMING_WORKDIR "bootstrapswarm.stdout.log"
+          $stderr = Join-Path $env:SWARMING_WORKDIR "bootstrapswarm.stderr.log"
+          $securePassword = ConvertTo-SecureString $env:SWARMING_PASSWORD -AsPlainText -Force
+          $credential = [System.Management.Automation.PSCredential]::new(".\$env:SWARMING_USER", $securePassword)
+          $process = Start-Process -FilePath "C:\golang\bootstrapswarm.exe" -ArgumentList @("-hostname", $env:LUCI_BOT_HOSTNAME) -Credential $credential -WorkingDirectory $env:SWARMING_WORKDIR -RedirectStandardOutput $stdout -RedirectStandardError $stderr -Wait -PassThru
+
+          if (Test-Path $stdout) { Get-Content $stdout }
+          if (Test-Path $stderr) { Get-Content $stderr }
+          exit $process.ExitCode

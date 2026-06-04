@@ -23,7 +23,7 @@ The `builder` workflow follows the Go dashboard builder setup by minting a LUCI 
 
 The `builder` workflow runs on a Windows ARM64 runner. It downloads `luci_machine_tokend.exe` and `bootstrapswarm.exe` from `go-builder-data`, matching the Azure Windows ARM64 setup in `golang/build`. The Swarming bot handles CIPD-managed payloads after it starts.
 
-The certificate and private key are only used while minting `token.json`; the workflow deletes those PEM files before starting `bootstrapswarm`. `bootstrapswarm` receives only the `LUCI_MACHINE_TOKEN` path, matching the Azure setup where the token file is read by the Swarming bot.
+The certificate and private key are only used while minting `token.json`; the workflow deletes those PEM files before starting `bootstrapswarm`. `bootstrapswarm` runs as the local `swarming` user and receives only the `LUCI_MACHINE_TOKEN` path, matching the Azure setup where the token file is read by the Swarming bot.
 
 Required repository variables:
 
