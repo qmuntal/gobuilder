@@ -195,6 +195,10 @@ jobs:
           New-Item -ItemType Directory -Force -Path $swarmingTemp | Out-Null
           $env:TEMP = $swarmingTemp
           $env:TMP = $swarmingTemp
+          $env:HOME = $env:SWARMING_WORKDIR
+          $env:USERPROFILE = $env:SWARMING_WORKDIR
+          $env:HOMEDRIVE = "C:"
+          $env:HOMEPATH = "\b"
           $env:SWARMING_NEVER_REBOOT = "true"
 
           $stdout = Join-Path $env:SWARMING_WORKDIR "bootstrapswarm.stdout.log"
