@@ -11,7 +11,7 @@ jobs:
     env:
       LLVM_MINGW_VERSION: "20250514"
       LLVM_MINGW_DIR: C:\llvm-mingw
-      LUCI_BOT_HOSTNAME: windows-arm64-azure-qmuntal--02
+      LUCI_BOT_HOSTNAME: windows-arm64-azure-qmuntal--03
     defaults:
       run:
         shell: pwsh
