@@ -75,7 +75,8 @@ jobs:
             }
           }
 
-      - name: Install pywin32
+      - name: Locate Python
+        id: python
         run: |
           $python = Get-Command python3 -ErrorAction SilentlyContinue
           if (-not $python) {
@@ -86,25 +87,43 @@ jobs:
             exit 1
           }
 
-          & $python.Source -m pip install --upgrade pip
-          & $python.Source -m pip install pywin32
+          $version = & $python.Source -c "import platform; print(platform.python_version())"
+          $cacheDir = & $python.Source -m pip cache dir
+          Add-Content -Path $env:GITHUB_ENV -Value "PYTHON_EXE=$($python.Source)"
+          Add-Content -Path $env:GITHUB_ENV -Value "PIP_CACHE_DIR=$cacheDir"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
+
+      - name: Cache pip packages
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.PIP_CACHE_DIR }}
+          key: pip-windows-arm64-${{ steps.python.outputs.version }}-pywin32
+
+      - name: Install pywin32
+        run: |
+          & $env:PYTHON_EXE -m pip install --upgrade pip
+          & $env:PYTHON_EXE -m pip install pywin32
 
       - name: Prepare swarming user
         run: |
           $swarmingUser = "swarming"
           $swarmingPassword = "G0b!" + [Guid]::NewGuid().ToString("N") + "Aa1!"
           Write-Output "::add-mask::$swarmingPassword"
+          $securePassword = ConvertTo-SecureString $swarmingPassword -AsPlainText -Force
 
           if (-not (Get-LocalUser -Name $swarmingUser -ErrorAction SilentlyContinue)) {
             Write-Host "Creating $swarmingUser user"
-            net user $swarmingUser $swarmingPassword /ADD
+            New-LocalUser -Name $swarmingUser -Password $securePassword -PasswordNeverExpires -AccountNeverExpires
           } else {
             Write-Host "$swarmingUser user already exists"
-            net user $swarmingUser $swarmingPassword
+            Set-LocalUser -Name $swarmingUser -Password $securePassword -PasswordNeverExpires $true
           }
 
-          net localgroup administrators $swarmingUser /ADD
-          Set-LocalUser -Name $swarmingUser -PasswordNeverExpires $true
+          try {
+            Add-LocalGroupMember -Group "Administrators" -Member $swarmingUser -ErrorAction Stop
+          } catch [Microsoft.PowerShell.Commands.MemberExistsException] {
+            Write-Host "$swarmingUser is already in Administrators"
+          }
 
           $swarmingWorkDir = "C:\b"
           New-Item -ItemType Directory -Force -Path $swarmingWorkDir | Out-Null
