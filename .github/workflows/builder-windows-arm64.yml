@@ -271,6 +271,9 @@ jobs:
         run: |
           $securePassword = ConvertTo-SecureString $env:SWARMING_PASSWORD -AsPlainText -Force
           $credential = [System.Management.Automation.PSCredential]::new(".\$env:SWARMING_USER", $securePassword)
+          # bootstrapswarm does not forward bot arguments. Set the environment
+          # variable used by --one-shot so the bot exits after one real task.
+          [Environment]::SetEnvironmentVariable("SWARMING_BOT_ONE_SHOT", "1", [EnvironmentVariableTarget]::Machine)
           # -UseNewEnvironment asks Windows to construct the child environment
           # from Machine scope and the swarming user's profile, avoiding
           # inherited runneradmin profile paths such as APPDATA and USERPROFILE.
