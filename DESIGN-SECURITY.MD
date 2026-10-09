@@ -29,7 +29,8 @@ Out of scope:
 
 The main assets and security properties are:
 
-- `LUCI_BOT_KEY_PEM`, the private key used to mint a LUCI machine token. This needs confidentiality and integrity protection.
+- GitHub OIDC tokens, the generated ADC file, and the impersonated service-account tokens used for WIF. These need confidentiality and integrity protection for their lifetimes.
+- `GCP_WIF_PROVIDER` and `LUCI_BOT_SERVICE_ACCOUNT`, which select the federated identity configuration. These need integrity protection.
 - `token.json`, the LUCI machine token generated during the builder workflow. This needs confidentiality protection for its lifetime.
 - The repository and its workflows.
 - The GitHub Actions token used by the scheduler to dispatch builder runs.
@@ -39,7 +40,9 @@ The main assets and security properties are:
 The design treats these boundaries as security-relevant:
 
 - GitHub Actions control plane to workflow job runtime.
-- Repository contents to the secret-bearing builder job.
+- Repository contents to the credential-bearing builder job.
+- GitHub OIDC claims to the Google WIF/IAM impersonation policy.
+- The impersonated service account to the Token Server machine-FQDN policy.
 - Scheduler job to builder job.
 - GitHub APIs to local scheduler code.
 - Buildbucket API to local scheduler code.
@@ -76,6 +79,8 @@ flowchart LR
 	pypi[PyPI]
 	toolDownloads[Tool download origins]
 	luciToken[LUCI token server]
+	githubOIDC[GitHub OIDC]
+	googleIAM[Google WIF and IAM Credentials]
 	swarmingService[LUCI Swarming service]
 
 	reviewer --> repo
@@ -92,6 +97,9 @@ flowchart LR
 	builder --> pypi
 	builder --> toolDownloads
 	builder --> tokend
+	builder --> githubOIDC
+	tokend --> githubOIDC
+	tokend --> googleIAM
 	tokend --> luciToken
 	builder --> swarming
 	swarming --> swarmingService
@@ -101,7 +109,7 @@ flowchart LR
 
 The implementation follows these principles:
 
-- Keep the secret-bearing builder workflow independent from repository checkout.
+- Keep the credential-bearing builder workflow independent from repository checkout.
 - Grant each workflow only the GitHub token permissions it needs.
 - Pin executable workflow dependencies.
 - Verify mutable external downloads before executing them.
@@ -109,25 +117,25 @@ The implementation follows these principles:
 
 ## Decisions
 
-### 1. The builder workflow has no repository token permissions
+### 1. The builder workflow has only OIDC permission
 
-Decision: `builder-windows-arm64` declares `permissions: {}`.
+Decision: `builder-windows-arm64` grants only `id-token: write`.
 
-Rationale: this workflow handles LUCI credentials and starts the Swarming bot. It should not receive a repository-scoped `GITHUB_TOKEN` unless it has a concrete need for one.
+Rationale: GitHub requires `id-token: write` to issue the workflow's OIDC token. The builder does not need repository checkout or a repository-scoped `GITHUB_TOKEN`.
 
-Security effect: a compromised builder step should not be able to push code, create releases, open issues, update pull requests, or read private repository contents through the default token.
+Security effect: the default token cannot read private repository contents, push code, create releases, open issues, or update pull requests. OIDC issuance does not itself grant arbitrary Google Cloud permissions.
 
-Residual risk: the workflow still runs on GitHub-hosted infrastructure and receives LUCI credentials through Actions variables and secrets. GitHub Actions itself remains trusted infrastructure.
+Residual risk: the WIF provider and service-account IAM policy must restrict the trusted repository/owner IDs, workflow, branch and event. GitHub Actions remains trusted infrastructure.
 
 ### 2. The builder workflow does not check out the repository
 
-Decision: `builder-windows-arm64` does not use `actions/checkout`.
+Decision: `builder-windows-arm64` creates the authentication workspace directory without using `actions/checkout`. Runner setup remains inline, and dependency installation does not read checked-out requirements files.
 
-Rationale: repository checkout would expose repository contents to the same job that handles LUCI credentials. The builder does not need repository files to install tools, mint the LUCI token, or start `bootstrapswarm.exe`.
+Rationale: the pinned authentication action explicitly supports use without checkout. It needs an existing `GITHUB_WORKSPACE` directory to write ADC, not repository contents.
 
-Security effect: pull-request-controlled repository content cannot directly influence the secret-bearing builder runtime through checked-out scripts or files.
+Security effect: no repository contents or checkout credentials are introduced into the job, and repository scripts are not used to prepare or authenticate the builder.
 
-Residual risk: the workflow definition itself is still repository code. Changes to the workflow must be reviewed with the same care as code that handles credentials.
+Residual risk: workflow changes and WIF trust-policy changes still require review. Avoiding checkout is not isolation from other code running as an administrator on the same machine.
 
 ### 3. The scheduler has only the permissions required to dispatch builders
 
@@ -158,6 +166,7 @@ Pinned actions include:
 - `actions/checkout`
 - `actions/setup-go`
 - `actions/cache`
+- `google-github-actions/auth`
 
 Rationale: tags can move. A commit SHA identifies the exact action code reviewed at the time of pinning.
 
@@ -185,31 +194,31 @@ Residual risk: if a malicious artifact hash is committed to the workflow, the ch
 
 Decision: `pywin32` is installed as `pywin32==$PYWIN32_VERSION` with `--only-binary=:all:`. `.github/requirements-builder-windows-arm64.txt` mirrors that pin only so Dependabot can discover updates. The builder workflow still uses `PYWIN32_VERSION` directly and does not read the requirements file. `verify-dependency-pins` runs on Dependabot pull requests and fails when the mirrored requirements pin and `PYWIN32_VERSION` disagree.
 
-Rationale: `bootstrapswarm.exe` needs Python Windows integration. Pinning gives reproducible dependency selection, and wheel-only installation avoids arbitrary source build steps during the builder workflow. Dependabot understands requirements files, but the secret-bearing builder workflow should not check out the repository just to read a dependency pin. The sync check forces the workflow pin update to be an intentional reviewer-visible change.
+Rationale: `bootstrapswarm.exe` needs Python Windows integration. Pinning gives reproducible dependency selection, and wheel-only installation avoids arbitrary source build steps during the builder workflow. Dependabot understands requirements files, but the credential-bearing builder workflow should not check out the repository just to read a dependency pin. The sync check forces the workflow pin update to be an intentional reviewer-visible change.
 
 Security effect: avoids opportunistic upgrades, avoids running package build scripts from an sdist, and keeps dependency update discovery separate from the credentialed builder runtime.
 
 Residual risk: the workflow does not currently enforce a wheel hash for `pywin32`. The design trusts PyPI wheel distribution for the pinned version. The requirements file is metadata, not runtime configuration, and the sync check currently targets Dependabot PRs rather than every human-authored PR.
 
-### 8. LUCI private key material is short-lived on disk
+### 8. Bot authentication uses short-lived federated credentials
 
-Decision: the builder workflow writes `LUCI_BOT_CERT_PEM` and `LUCI_BOT_KEY_PEM` into temporary PEM files only for the `luci_machine_tokend.exe` invocation, then deletes them in a `finally` block.
+Decision: the builder uses GitHub OIDC, Google WIF and service-account impersonation, then invokes `luci_machine_tokend -google-auth`. It no longer reads a bot certificate or private-key secret. The authentication action removes its generated ADC file at the end of the job, and `gha-creds-*.json` is ignored by Git.
 
-Rationale: `luci_machine_tokend.exe` expects PEM files, but the private key should not remain on disk longer than necessary. The public certificate is handled together with the key for the token minting step, but it is not treated as a protected asset.
+Rationale: the runner needs temporary authorization to mint a machine token, not a long-lived exportable private key.
 
-Security effect: reduces the post-mint exposure window for raw private key material.
+Security effect: no static bot private key is stored in repository secrets or written to the runner. Token Server rules and Swarming configuration explicitly authorize the dedicated service account and machine identity.
 
-Residual risk: the key still exists in the job environment and temporary files during the minting step. A malicious command in the same step could read it.
+Residual risk: the ADC file and short-lived tokens are sensitive and can be read by sufficiently privileged code on the runner. Token Server sees the impersonated service account, not the original GitHub claims; IAM/WIF restrictions are part of the trust boundary. Disabling federation does not instantly revoke already minted tokens.
 
-### 9. The Swarming bot receives only the minted LUCI machine token path
+### 9. The Swarming bot uses the minted LUCI machine token file
 
-Decision: `bootstrapswarm.exe` reads `token.json` from its default Windows token path, `C:\luci_machine_tokend\token.json`; the PEM files are deleted before `bootstrapswarm.exe` starts.
+Decision: `bootstrapswarm.exe` reads `token.json` from its default Windows token path, `C:\luci_machine_tokend\token.json`. ADC and OIDC environment variables are not copied into Machine scope for the `-UseNewEnvironment` child process.
 
-Rationale: the Swarming bot needs the machine token, not the original private key.
+Rationale: the Swarming bot needs the machine token, not the credentials used to mint it.
 
-Security effect: a running Swarming bot process is not handed the long-lived private key.
+Security effect: the bot bootstrap contract and token path remain unchanged without intentionally forwarding the WIF credential environment.
 
-Residual risk: `token.json` is still a sensitive bearer credential for the lifetime of the bot process.
+Residual risk: `token.json` is still a sensitive bearer credential. The generated ADC file remains in the workspace until the authentication action's cleanup, and the administrative Swarming user is not a sandbox boundary.
 
 ### 10. The Swarming bot runs as a dedicated local user
 
