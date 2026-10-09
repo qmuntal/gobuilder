@@ -120,7 +120,7 @@ Result: a scheduler run can request multiple builders quickly. If one dispatch f
 
 Decision: builder runs register as `windows-arm64-azure-qmuntal--NN`.
 
-Rationale: LUCI Swarming treats the suffix after `--` as the bot slot. The stable prefix keeps the host identity aligned with the LUCI bot certificate and bot group configuration, while the suffix distinguishes concurrent slots.
+Rationale: LUCI Swarming treats the suffix after `--` as the bot slot. The stable prefix keeps the host identity aligned with the Token Server identity rule and bot group configuration, while the suffix distinguishes concurrent slots. WIF minting requests the base FQDN `windows-arm64-azure-qmuntal.bots.golang.org`.
 
 Result: LUCI UI pages are stable per slot and scheduler-dispatched runs can avoid active slot reuse.
 
@@ -224,7 +224,7 @@ Decision: `luci_machine_tokend.exe` and `bootstrapswarm.exe` are downloaded from
 
 Rationale: these match the Windows ARM64 LUCI setup used by the Go builder infrastructure.
 
-Result: the workflow follows the existing LUCI bootstrap path rather than carrying local copies of the tools.
+Result: the workflow follows the existing LUCI bootstrap path rather than carrying local copies of the tools. The token daemon must support `-google-auth` and `-machine-fqdn`; the workflow checks these capabilities before authentication. Its existing SHA-256 pin must be updated to a verified WIF-capable binary before this migration can run.
 
 ### `pywin32`
 
@@ -243,6 +243,14 @@ Rationale: the builder workflow is intentionally self-contained. Update automati
 Result: updates to mirrored dependencies require both metadata and runtime workflow pin changes.
 
 ## Runner Preparation
+
+### Federated Bot Authentication
+
+Decision: the builder prepares the `GITHUB_WORKSPACE` directory without checking out the repository, then uses a pinned Google authentication action immediately before minting the LUCI machine token. `GCP_WIF_PROVIDER` and `LUCI_BOT_SERVICE_ACCOUNT` select the configured federation provider and dedicated service account. `luci_machine_tokend -google-auth` reads ADC and writes the existing token-file format.
+
+Rationale: GitHub OIDC and WIF replace the long-lived bot private key with short-lived credentials. Token Server authorizes the impersonated service account, so repository/workflow restrictions belong in the WIF and IAM policies, and host restrictions belong in the Token Server rule.
+
+Result: the bot launch and token path remain unchanged. Token Server, Swarming verifier/configuration, and the published token-daemon binary must support identity-derived tokens before the workflow can run. See [README.md](README.md#wif-rollout-prerequisites) for the rollout prerequisites.
 
 ### Dedicated Swarming User
 

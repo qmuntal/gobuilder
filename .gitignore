@@ -26,6 +26,7 @@ go.work.sum
 
 # env file
 .env
+gha-creds-*.json
 
 # Editor/IDE
 # .idea/

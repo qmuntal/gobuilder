@@ -9,7 +9,8 @@ on:
         required: false
         default: "99"
 
-permissions: {}
+permissions:
+  id-token: write
 
 jobs:
   luci:
@@ -23,6 +24,7 @@ jobs:
       LLVM_MINGW_SHA256: d5b609a7f2857eac0c035e290a77012e177f58444f5cfa27c649d766c2d8c1d1
       BOOTSTRAPSWARM_SHA256: b4c2320e709afb5a0613e4f10017acb86cd795287aaa7b70e39f3e5934a9384f
       LUCI_BOT_HOSTNAME_PREFIX: windows-arm64-azure-qmuntal
+      # TODO: update this verified pin to a binary containing luci-go CL 8549593.
       LUCI_MACHINE_TOKEND_SHA256: df1c5646ef5f9d41f2bd1e57ad0ba8acdb6e8d8c0dc70ee3cf382a7d60387697
       LUCI_MACHINE_TOKEN_BACKEND: luci-token-server.appspot.com
       LUCI_MACHINE_TOKEN_FILE: C:\luci_machine_tokend\token.json
@@ -217,52 +219,52 @@ jobs:
             -Uri "https://storage.googleapis.com/go-builder-data/windows-arm64-luci_machine_tokend.exe" `
             -OutFile (Join-Path $env:LUCI_TOOL_ROOT "luci_machine_tokend.exe") `
             -Sha256 $env:LUCI_MACHINE_TOKEND_SHA256
+          $tokendHelp = & (Join-Path $env:LUCI_TOOL_ROOT "luci_machine_tokend.exe") -help 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($tokendHelp -notmatch '(?m)^\s+-google-auth(?:\s|$)' -or
+              $tokendHelp -notmatch '(?m)^\s+-machine-fqdn(?:\s|$)') {
+            throw "Pinned luci_machine_tokend lacks WIF support. Publish a binary containing luci-go CL 8549593 and update LUCI_MACHINE_TOKEND_SHA256."
+          }
           & $env:VERIFIED_DOWNLOAD_SCRIPT `
             -Uri "https://storage.googleapis.com/go-builder-data/windows-arm64-bootstrapswarm.exe" `
             -OutFile (Join-Path $env:LUCI_TOOL_ROOT "bootstrapswarm.exe") `
             -Sha256 $env:BOOTSTRAPSWARM_SHA256
           icacls $env:LUCI_TOOL_ROOT /grant "${env:SWARMING_USER}:(OI)(CI)RX"
 
+      - name: Prepare authentication workspace
+        timeout-minutes: 2
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:GITHUB_WORKSPACE | Out-Null
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        timeout-minutes: 2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.LUCI_BOT_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+          export_environment_variables: true
+          cleanup_credentials: true
+
       - name: Mint LUCI machine token
         timeout-minutes: 5
-        env:
-          LUCI_BOT_CERT_PEM: ${{ vars.LUCI_BOT_CERT_PEM }}
-          LUCI_BOT_KEY_PEM: ${{ secrets.LUCI_BOT_KEY_PEM }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:LUCI_BOT_CERT_PEM)) { Write-Error "LUCI_BOT_CERT_PEM variable is required"; exit 1 }
-          if ([string]::IsNullOrWhiteSpace($env:LUCI_BOT_KEY_PEM)) { Write-Error "LUCI_BOT_KEY_PEM secret is required"; exit 1 }
-
-          $luciRoot = Join-Path $env:RUNNER_TEMP "luci"
           $tokenDir = Split-Path -Parent $env:LUCI_MACHINE_TOKEN_FILE
-          New-Item -ItemType Directory -Force -Path $luciRoot | Out-Null
           New-Item -ItemType Directory -Force -Path $tokenDir | Out-Null
           icacls $tokenDir /grant "${env:SWARMING_USER}:(OI)(CI)RX"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          $certFile = Join-Path $luciRoot "hostname.cert"
-          $keyFile = Join-Path $luciRoot "hostname.key"
-
-          # GitHub variables/secrets may preserve real newlines or literal \n escapes; write normalized PEM files for tokend.
-          $certPem = $env:LUCI_BOT_CERT_PEM.Trim().Replace("\r\n", "`n").Replace("\n", "`n").Replace("`r`n", "`n").Replace("`r", "`n").Trim() + "`n"
-          $keyPem = $env:LUCI_BOT_KEY_PEM.Trim().Replace("\r\n", "`n").Replace("\n", "`n").Replace("`r`n", "`n").Replace("`r", "`n").Trim() + "`n"
-          [System.IO.File]::WriteAllText($certFile, $certPem, [System.Text.Encoding]::ASCII)
-          [System.IO.File]::WriteAllText($keyFile, $keyPem, [System.Text.Encoding]::ASCII)
-
-          $tokenExitCode = 0
-          try {
-            & (Join-Path $env:LUCI_TOOL_ROOT "luci_machine_tokend.exe") `
-              -backend $env:LUCI_MACHINE_TOKEN_BACKEND `
-              -cert-pem $certFile `
-              -pkey-pem $keyFile `
-              -token-file $env:LUCI_MACHINE_TOKEN_FILE
-            $tokenExitCode = $LASTEXITCODE
-          } finally {
-            Remove-Item -Path $certFile, $keyFile -Force -ErrorAction SilentlyContinue
-          }
-          if ($tokenExitCode -ne 0) {
-            exit $tokenExitCode
-          }
+          # The --NN slot suffix is not part of the authenticated host FQDN.
+          $machineFqdn = "${env:LUCI_BOT_HOSTNAME_PREFIX}.bots.golang.org"
+          & (Join-Path $env:LUCI_TOOL_ROOT "luci_machine_tokend.exe") `
+            -backend $env:LUCI_MACHINE_TOKEN_BACKEND `
+            -google-auth `
+            -machine-fqdn $machineFqdn `
+            -token-file $env:LUCI_MACHINE_TOKEN_FILE
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           icacls $env:LUCI_MACHINE_TOKEN_FILE /grant "${env:SWARMING_USER}:R"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Register LUCI builder
         # The minted LUCI machine token is valid for 60 minutes, so increasing
