@@ -269,9 +269,9 @@ Result: updates to mirrored dependencies require metadata and both runtime workf
 
 ### Dedicated Swarming User
 
-Decision: the builder workflow creates or updates a local `swarming` user, prepares `C:\b`, and starts `bootstrapswarm.exe` under that account with `Start-Process -Credential -LoadUserProfile -UseNewEnvironment`. Tool paths needed by the Swarming process are written to Machine-scope `PATH` before launch. The LUCI machine token is written to `C:\luci_machine_tokend\token.json`, which is `bootstrapswarm`'s default Windows token path, so no `LUCI_MACHINE_TOKEN` environment variable is needed.
+Decision: the builder workflow creates or updates a local `swarming` user, grants it `SeCreateSymbolicLinkPrivilege` instead of adding it to Administrators, prepares `C:\b`, and starts `bootstrapswarm.exe` under that account with `Start-Process -Credential -LoadUserProfile -UseNewEnvironment`. Tool paths needed by the Swarming process are written to Machine-scope `PATH` before launch. The LUCI machine token is written to `C:\luci_machine_tokend\token.json`, which is `bootstrapswarm`'s default Windows token path, so no `LUCI_MACHINE_TOKEN` environment variable is needed.
 
-Rationale: this approximates the Go Azure builders' interactive `swarming` login model without rebooting the GitHub-hosted runner. `-UseNewEnvironment` avoids inheriting the GitHub runner account's profile variables, while `-LoadUserProfile` initializes the target user's Windows profile state.
+Rationale: this approximates the Go Azure builders' interactive `swarming` login model without rebooting the GitHub-hosted runner. The symbolic-link privilege supports builds without granting administrator membership. `-UseNewEnvironment` avoids inheriting the GitHub runner account's profile variables, while `-LoadUserProfile` initializes the target user's Windows profile state.
 
 Result: Swarming runs with the normal Windows profile paths for the `swarming` user, while build work still happens under `C:\b`.
 

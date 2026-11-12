@@ -222,13 +222,13 @@ Residual risk: `token.json` is still a sensitive bearer credential for the lifet
 
 ### 10. The Swarming bot runs as a dedicated local user
 
-Decision: the workflow creates or updates a local `swarming` user, assigns a generated password, masks it in logs, and starts `bootstrapswarm.exe` using that credential.
+Decision: the workflow creates or updates a local `swarming` user, assigns a generated password, masks it in logs, and starts `bootstrapswarm.exe` using that credential. It grants the user `SeCreateSymbolicLinkPrivilege` directly instead of adding it to Administrators.
 
-Rationale: this matches the expected LUCI builder shape more closely than running the bot directly as the default Actions user.
+Rationale: this matches the expected LUCI builder shape more closely than running the bot directly as the default Actions user, while allowing symbolic-link-dependent builds without granting administrator membership.
 
-Security effect: avoids running the bot as the default runner account and avoids inheriting the default runner account's profile environment.
+Security effect: avoids running the bot as the default runner account or granting it administrator membership, and avoids inheriting the default runner account's profile environment.
 
-Residual risk: the `swarming` user is added to Administrators to match builder expectations. This is not a sandbox boundary against malicious build payloads.
+Residual risk: existing group memberships and user rights are not removed, symbolic links can be abused, and the dedicated account is not a sandbox boundary against malicious build payloads.
 
 ### 11. API requests are constrained before they leave the scheduler
 
@@ -306,7 +306,7 @@ Repository administrators should treat changes to workflows, pinned hashes, sche
 
 - GitHub-hosted runners and GitHub Actions are trusted infrastructure for this design.
 - LUCI services and downloaded LUCI bootstrap tools are trusted once their expected hashes are accepted into the repository.
-- The `swarming` user is an administrator, so it is an execution identity boundary, not a privilege sandbox.
+- The `swarming` user can create symbolic links and execute build payloads, and existing memberships are not removed; the account is not a privilege sandbox.
 - `pywin32` is not hash-pinned today; it is version-pinned and wheel-only.
 - Dependabot pin synchronization is enforced for Dependabot PRs, not every human-authored PR.
 - The 60-minute registration timeout bounds execution but is not an idle detector.

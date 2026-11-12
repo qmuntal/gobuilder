@@ -47,6 +47,8 @@ The `builder-windows-arm64` workflow runs on a Windows ARM64 runner. It download
 
 The runner must provide `python3.exe` on `PATH`. The workflow checks this before provisioning because the pinned bootstrap executable launches Python by that name; `python.exe` alone is not sufficient.
 
+The workflow grants the local `swarming` user `SeCreateSymbolicLinkPrivilege` for symbolic links instead of adding it to Administrators.
+
 The certificate and private key are only used while minting `token.json`; the workflow deletes those PEM files before starting `bootstrapswarm`. The token is written to `C:\luci_machine_tokend\token.json`, which is `bootstrapswarm`'s default Windows token path, and the local `swarming` user is granted read access to it.
 
 The workflow registers each GitHub Actions run as a LUCI composite bot ID of the form `windows-arm64-azure-qmuntal--NN`, where `NN` is the stable `bot_index` slot. LUCI Swarming uses the suffix after `--` as the bot slot identifier, while the host identity used for bot auth and bot group lookup is the base `windows-arm64-azure-qmuntal`. The LUCI bot certificate and bots.cfg entry should therefore be issued/configured for the base hostname, not for a single suffixed slot.

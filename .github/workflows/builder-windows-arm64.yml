@@ -181,10 +181,21 @@ jobs:
             Set-LocalUser -Name $env:SWARMING_USER -Password $securePassword -PasswordNeverExpires $true
           }
 
-          try {
-            Add-LocalGroupMember -Group "Administrators" -Member $env:SWARMING_USER -ErrorAction Stop
-          } catch [Microsoft.PowerShell.Commands.MemberExistsException] {
-            Write-Host "$env:SWARMING_USER is already in Administrators"
+          Write-Host "Granting SeCreateSymbolicLinkPrivilege to $env:SWARMING_USER"
+          $swarmingSid = (Get-LocalUser -Name $env:SWARMING_USER).SID.Value
+          @'
+          import sys
+          import win32security
+
+          sid = win32security.ConvertStringSidToSid(sys.argv[1])
+          policy = win32security.LsaOpenPolicy(None, win32security.POLICY_LOOKUP_NAMES | win32security.POLICY_CREATE_ACCOUNT)
+          try:
+              win32security.LsaAddAccountRights(policy, sid, ("SeCreateSymbolicLinkPrivilege",))
+          finally:
+              win32security.LsaClose(policy)
+          '@ | & $env:PYTHON_EXE - $swarmingSid
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
           }
 
           New-Item -ItemType Directory -Force -Path $env:SWARMING_WORKDIR | Out-Null
