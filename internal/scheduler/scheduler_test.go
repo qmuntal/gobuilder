@@ -3,6 +3,9 @@ package scheduler
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -236,6 +239,85 @@ func TestRunDoesNotDispatchWithUnknownActiveRunSlot(testingContext *testing.T) {
 	}
 	if requests := dispatcher.recordedRequests(); len(requests) != 0 {
 		testingContext.Fatalf("dispatcher requests = %d, want 0", len(requests))
+	}
+}
+
+func TestRunAccountsForGitHubWorkflowRuns(testingContext *testing.T) {
+	for _, testCase := range []struct {
+		name         string
+		workflow     string
+		displayTitle string
+		statuses     map[string]bool
+		maxJobs      int
+		wantBotIndex string
+	}{
+		{
+			name:         "workflow ID with occupied capacity",
+			workflow:     "12345",
+			displayTitle: "builder-windows-arm64 bot 01",
+			statuses:     map[string]bool{"in_progress": true},
+			maxJobs:      1,
+		},
+		{
+			name:         "unparseable title blocks allocation",
+			workflow:     "builder-windows-arm64.yml",
+			displayTitle: "legacy builder run",
+			statuses:     map[string]bool{"in_progress": true},
+			maxJobs:      2,
+		},
+		{
+			name:         "status transition leaves free capacity",
+			workflow:     "builder-windows-arm64.yml",
+			displayTitle: "builder-windows-arm64 bot 01",
+			statuses:     map[string]bool{"queued": true, "in_progress": true},
+			maxJobs:      2,
+			wantBotIndex: "02",
+		},
+	} {
+		testingContext.Run(testCase.name, func(testingContext *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+				responseWriter.Header().Set("Content-Type", "application/json")
+				if testCase.statuses[request.URL.Query().Get("status")] {
+					_ = json.NewEncoder(responseWriter).Encode(map[string]any{
+						"total_count": 1,
+						"workflow_runs": []map[string]any{
+							{"id": 1, "display_title": testCase.displayTitle},
+						},
+					})
+					return
+				}
+				_, _ = responseWriter.Write([]byte(`{"total_count":0,"workflow_runs":[]}`))
+			}))
+			defer server.Close()
+
+			dispatcher := &recordingDispatcher{}
+			result, err := Run(context.Background(), Config{
+				Queue:      fakeJobQueue{jobs: 5},
+				Dispatcher: dispatcher,
+				RunCounter: githubactions.Dispatcher{
+					Token:      "token",
+					APIURL:     server.URL,
+					Repository: "owner/repo",
+					HTTPClient: server.Client(),
+				},
+				MaxJobs:  testCase.maxJobs,
+				Workflow: testCase.workflow,
+			})
+			if err != nil {
+				testingContext.Fatalf("Run() error = %v", err)
+			}
+			wantDispatches := 0
+			if testCase.wantBotIndex != "" {
+				wantDispatches = 1
+			}
+			requests := dispatcher.recordedRequests()
+			if result.Dispatched != wantDispatches || len(requests) != wantDispatches {
+				testingContext.Fatalf("dispatched = %d, requests = %d, want %d", result.Dispatched, len(requests), wantDispatches)
+			}
+			if wantDispatches != 0 && requests[0].Inputs[botIndexInput] != testCase.wantBotIndex {
+				testingContext.Fatalf("bot index = %q, want %q", requests[0].Inputs[botIndexInput], testCase.wantBotIndex)
+			}
+		})
 	}
 }
 

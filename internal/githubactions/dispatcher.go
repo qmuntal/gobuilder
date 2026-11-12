@@ -48,19 +48,24 @@ func (dispatcher Dispatcher) ActiveWorkflowRuns(ctx context.Context, workflow st
 	}
 
 	workflow = strings.TrimSpace(workflow)
-	targetRunNamePrefix := workflowRunNamePrefix(workflow)
 	activeRuns := ActiveWorkflowRuns{BotIndexes: map[int]int{}}
+	seenRunIDs := map[int64]bool{}
 	for _, status := range activeWorkflowRunStatuses {
 		runs, err := dispatcher.workflowRuns(ctx, workflow, status)
 		if err != nil {
 			return ActiveWorkflowRuns{}, err
 		}
 		for _, run := range runs.Runs {
-			botIndex, isTargetRun, ok := parseWorkflowRunBotIndex(run.DisplayTitle, targetRunNamePrefix)
-			if !isTargetRun {
+			if run.ID <= 0 {
+				return ActiveWorkflowRuns{}, fmt.Errorf("github workflow runs query returned invalid run ID %d", run.ID)
+			}
+			if seenRunIDs[run.ID] {
 				continue
 			}
+			seenRunIDs[run.ID] = true
 			activeRuns.Count++
+
+			botIndex, ok := parseWorkflowRunBotIndex(run.DisplayTitle)
 			if !ok {
 				activeRuns.UnknownCount++
 				continue
@@ -77,6 +82,7 @@ type workflowRunsResponse struct {
 }
 
 type workflowRun struct {
+	ID           int64  `json:"id"`
 	DisplayTitle string `json:"display_title"`
 }
 
@@ -154,36 +160,29 @@ func (dispatcher Dispatcher) workflowRunsPage(ctx context.Context, requestURL st
 	return payload, nil
 }
 
-func workflowRunNamePrefix(workflow string) string {
-	workflow = strings.TrimSpace(workflow)
-	if index := strings.LastIndexAny(workflow, `/\`); index >= 0 {
-		workflow = workflow[index+1:]
-	}
-	workflow = strings.TrimSuffix(strings.TrimSuffix(workflow, ".yaml"), ".yml")
-	return workflow + " bot "
-}
-
-func parseWorkflowRunBotIndex(displayTitle, targetRunNamePrefix string) (botIndex int, isTargetRun bool, ok bool) {
+func parseWorkflowRunBotIndex(displayTitle string) (botIndex int, ok bool) {
+	const separator = " bot "
 	displayTitle = strings.TrimSpace(displayTitle)
-	if !strings.HasPrefix(displayTitle, targetRunNamePrefix) {
-		return 0, false, false
+	separatorIndex := strings.LastIndex(displayTitle, separator)
+	if separatorIndex <= 0 {
+		return 0, false
 	}
 
-	rawBotIndex := strings.TrimSpace(strings.TrimPrefix(displayTitle, targetRunNamePrefix))
+	rawBotIndex := strings.TrimSpace(displayTitle[separatorIndex+len(separator):])
 	if len(rawBotIndex) != 2 {
-		return 0, true, false
+		return 0, false
 	}
 	for _, digit := range rawBotIndex {
 		if digit < '0' || digit > '9' {
-			return 0, true, false
+			return 0, false
 		}
 	}
 
 	botIndex, err := strconv.Atoi(rawBotIndex)
 	if err != nil || botIndex < 1 {
-		return 0, true, false
+		return 0, false
 	}
-	return botIndex, true, true
+	return botIndex, true
 }
 
 func (dispatcher Dispatcher) DispatchWorkflow(ctx context.Context, dispatchRequest DispatchRequest) error {

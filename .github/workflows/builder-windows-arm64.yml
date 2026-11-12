@@ -6,6 +6,7 @@ on:
     inputs:
       bot_index:
         description: Two-digit stable LUCI bot slot index
+        type: string
         required: false
         default: "99"
 
@@ -36,10 +37,12 @@ jobs:
     steps:
       - name: Set LUCI bot hostname
         timeout-minutes: 2
+        env:
+          BOT_INDEX: ${{ inputs.bot_index }}
         run: |
-          $botIndex = "${{ inputs.bot_index }}".Trim()
-          if ($botIndex -notmatch '^\d{2}$') {
-            Write-Error "bot_index must be exactly two digits, got '$botIndex'"
+          $botIndex = $env:BOT_INDEX
+          if ($botIndex -notmatch '\A[0-9]{2}\z') {
+            Write-Error "bot_index must be exactly two ASCII digits, got '$botIndex'"
             exit 1
           }
 

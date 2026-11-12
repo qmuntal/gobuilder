@@ -10,6 +10,11 @@ on:
         type: number
         required: false
         default: 5
+      workflow:
+        description: Builder workflow file name or numeric ID to dispatch
+        type: string
+        required: false
+        default: builder-windows-arm64.yml
       builder_name:
         description: Only count queued LUCI builders whose name contains this value
         type: string
@@ -28,6 +33,7 @@ jobs:
   schedule:
     runs-on: ubuntu-latest
     env:
+      BUILDER_WORKFLOW: ${{ inputs.workflow || 'builder-windows-arm64.yml' }}
       BUILDER_NAME: ${{ inputs.builder_name || 'windows-arm64' }}
       MAX_JOBS: ${{ inputs.max_jobs || 5 }}
     steps:
@@ -57,6 +63,6 @@ jobs:
           --github-token "${{ github.token }}"
           --repository "${{ github.repository }}"
           --ref "${{ github.ref_name }}"
-          --workflow "builder-${{ env.BUILDER_NAME }}.yml"
-          --buildbucket-builder-name "${{ env.BUILDER_NAME }}"
+          --workflow "$BUILDER_WORKFLOW"
+          --buildbucket-builder-name "$BUILDER_NAME"
           --max-jobs "${{ env.MAX_JOBS }}"

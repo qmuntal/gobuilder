@@ -66,6 +66,8 @@ Rationale: Buildbucket is the backend for the Go LUCI builders shown in the LUCI
 
 Result: the scheduler scales GitHub-hosted builder capacity from LUCI queue pressure rather than GitHub-side events.
 
+The scheduler workflow defaults to targeting `builder-windows-arm64.yml`. Its `workflow` input independently selects the builder workflow filename or numeric ID to count and dispatch. The `builder_name` input only changes the queue substring filter; narrowing it to a value such as `gotip-windows-arm64` does not change the selected workflow. A selected builder workflow must accept `bot_index` and expose its slot in the run name.
+
 ### Active Run Accounting
 
 Decision: active GitHub Actions builder runs count against the configured maximum before new runs are dispatched.
@@ -78,6 +80,8 @@ The GitHub client counts runs in these statuses:
 - `waiting`
 - `pending`
 
+Every run returned by the workflow-specific endpoint counts as active, regardless of its display title. Runs are deduplicated by GitHub run ID across pages and status queries, so a run changing status is counted only once. Missing or nonpositive run IDs cause an error rather than risking incorrect deduplication.
+
 Rationale: queued or waiting GitHub Actions runs already represent requested capacity. Counting only running jobs would over-dispatch while GitHub is still placing jobs.
 
 Result: `--max-jobs` means maximum active builder workflow slots, not maximum newly dispatched jobs per scheduler tick.
@@ -89,6 +93,8 @@ Decision: scheduler-dispatched builders use two-digit slots from `01` through `-
 Rationale: stable slots make LUCI bot pages easier to follow while still allowing multiple concurrent temporary bots.
 
 Result: the scheduler chooses the first free slots and passes each one as the `bot_index` workflow input.
+
+Existing slots are parsed from the final ` bot NN` suffix of each run's display title. The workflow-specific API endpoint establishes the run's identity, so parsing does not assume the title prefix matches a workflow filename or numeric ID.
 
 Allocation rules:
 
@@ -170,9 +176,9 @@ Result: the scheduler refuses impossible three-digit slot plans.
 
 ### Builder Slot Input
 
-Decision: `bot_index` must be exactly two digits and greater than zero.
+Decision: `bot_index` must be exactly two ASCII digits and greater than zero. The workflow reads the literal input through an environment variable and rejects whitespace rather than trimming it.
 
-Rationale: the builder workflow constructs a LUCI bot hostname from this value.
+Rationale: the builder workflow constructs a LUCI bot hostname from this value. The concurrency group uses the raw input, so distinct inputs must not normalize to the same bot ID.
 
 Result: malformed manual inputs fail early before token minting or Swarming startup.
 

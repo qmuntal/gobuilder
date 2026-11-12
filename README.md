@@ -19,9 +19,13 @@ The scheduler counts queued Go LUCI builds by querying Buildbucket, the backend 
 - `--buildbucket-bucket`: LUCI bucket to query, default `ci`
 - `--buildbucket-builder-name`: optional builder-name substring to count; empty counts all builders
 
+The scheduler workflow defaults to dispatching `builder-windows-arm64.yml`. Its manual `workflow` input accepts a different builder workflow filename or numeric ID. The separate `builder_name` input only filters the Buildbucket queue, so a value such as `gotip-windows-arm64` narrows the queued builds without selecting a different workflow. The selected builder workflow must accept a `bot_index` input and expose that slot in a run name ending in ` bot NN`.
+
 Before dispatching, the scheduler counts active `builder-windows-arm64` workflow runs in GitHub Actions and reads their stable `bot_index` slots from the workflow run name. It starts only the remaining capacity up to `--max-jobs` and passes each new workflow the first free two-digit slot. The builder workflow uses that index as the suffix of the LUCI composite bot ID, keeping the bot pages stable in the LUCI UI while still allowing multiple concurrent slots. If an active workflow run does not expose a parseable slot, the scheduler dispatches no new builders rather than risk reusing an occupied bot ID.
 
-Manual `builder-windows-arm64` workflow dispatches default to slot `99`; scheduler-dispatched runs use the first free slot in the configured active range.
+Active runs are deduplicated by GitHub run ID across status queries. Slots are read from the ` bot NN` suffix of the run name, independently of whether `--workflow` is a filename or a numeric ID.
+
+Manual `builder-windows-arm64` workflow dispatches default to slot `99`; scheduler-dispatched runs use the first free slot in the configured active range. Slot inputs must be exactly two ASCII digits from `01` to `99`, with no surrounding whitespace.
 
 Design details are documented in [DESIGN.md](DESIGN.md). Security hardening details are documented in [DESIGN-SECURITY.MD](DESIGN-SECURITY.MD).
 
