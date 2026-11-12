@@ -88,6 +88,7 @@ func normalizeBaseURL(rawBaseURL string) (string, error) {
 func (queue Queue) JobsInQueue(ctx context.Context) (int, error) {
 	queueDepth := 0
 	pageToken := ""
+	seenPageTokens := map[string]bool{}
 
 	for {
 		response, err := queue.searchScheduledBuilds(ctx, pageToken)
@@ -99,10 +100,11 @@ func (queue Queue) JobsInQueue(ctx context.Context) (int, error) {
 		if response.NextPageToken == "" {
 			return queueDepth, nil
 		}
-		if response.NextPageToken == pageToken {
-			return 0, fmt.Errorf("buildbucket returned repeated page token %q", pageToken)
+		if seenPageTokens[response.NextPageToken] {
+			return 0, fmt.Errorf("buildbucket returned repeated page token %q", response.NextPageToken)
 		}
 
+		seenPageTokens[response.NextPageToken] = true
 		pageToken = response.NextPageToken
 	}
 }

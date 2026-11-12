@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -244,44 +245,79 @@ func TestRunDoesNotDispatchWithUnknownActiveRunSlot(testingContext *testing.T) {
 
 func TestRunAccountsForGitHubWorkflowRuns(testingContext *testing.T) {
 	for _, testCase := range []struct {
-		name         string
-		workflow     string
-		displayTitle string
-		statuses     map[string]bool
-		maxJobs      int
-		wantBotIndex string
+		name            string
+		workflow        string
+		displayTitle    string
+		status          string
+		transitionQuery string
+		maxJobs         int
+		wantBotIndex    string
 	}{
 		{
 			name:         "workflow ID with occupied capacity",
 			workflow:     "12345",
 			displayTitle: "builder-windows-arm64 bot 01",
-			statuses:     map[string]bool{"in_progress": true},
+			status:       "in_progress",
 			maxJobs:      1,
 		},
 		{
 			name:         "unparseable title blocks allocation",
 			workflow:     "builder-windows-arm64.yml",
 			displayTitle: "legacy builder run",
-			statuses:     map[string]bool{"in_progress": true},
+			status:       "in_progress",
 			maxJobs:      2,
 		},
 		{
-			name:         "status transition leaves free capacity",
+			name:            "status transition leaves free capacity",
+			workflow:        "builder-windows-arm64.yml",
+			displayTitle:    "builder-windows-arm64 bot 01",
+			status:          "queued",
+			transitionQuery: "queued",
+			maxJobs:         2,
+			wantBotIndex:    "02",
+		},
+		{
+			name:            "waiting run resumes between status queries",
+			workflow:        "builder-windows-arm64.yml",
+			displayTitle:    "builder-windows-arm64 bot 01",
+			status:          "waiting",
+			transitionQuery: "in_progress",
+			maxJobs:         1,
+		},
+		{
+			name:            "pending run resumes between status queries",
+			workflow:        "builder-windows-arm64.yml",
+			displayTitle:    "builder-windows-arm64 bot 01",
+			status:          "pending",
+			transitionQuery: "in_progress",
+			maxJobs:         1,
+		},
+		{
+			name:         "completed run does not occupy a slot",
 			workflow:     "builder-windows-arm64.yml",
 			displayTitle: "builder-windows-arm64 bot 01",
-			statuses:     map[string]bool{"queued": true, "in_progress": true},
-			maxJobs:      2,
-			wantBotIndex: "02",
+			status:       "completed",
+			maxJobs:      1,
+			wantBotIndex: "01",
 		},
 	} {
 		testingContext.Run(testCase.name, func(testingContext *testing.T) {
+			var transitioned atomic.Bool
 			server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+				statusAtSnapshot := testCase.status
+				if transitioned.Load() {
+					statusAtSnapshot = "in_progress"
+				}
+				queriedStatus := request.URL.Query().Get("status")
+				if testCase.transitionQuery != "" && (queriedStatus == "" || queriedStatus == testCase.transitionQuery) {
+					transitioned.Store(true)
+				}
 				responseWriter.Header().Set("Content-Type", "application/json")
-				if testCase.statuses[request.URL.Query().Get("status")] {
+				if queriedStatus == "" || queriedStatus == statusAtSnapshot {
 					_ = json.NewEncoder(responseWriter).Encode(map[string]any{
 						"total_count": 1,
 						"workflow_runs": []map[string]any{
-							{"id": 1, "display_title": testCase.displayTitle},
+							{"id": 1, "display_title": testCase.displayTitle, "status": statusAtSnapshot},
 						},
 					})
 					return

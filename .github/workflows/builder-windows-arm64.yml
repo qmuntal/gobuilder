@@ -149,12 +149,9 @@ jobs:
         id: python
         timeout-minutes: 2
         run: |
-          $python = Get-Command python3 -ErrorAction SilentlyContinue
+          $python = Get-Command python3.exe -CommandType Application -ErrorAction SilentlyContinue
           if (-not $python) {
-            $python = Get-Command python -ErrorAction SilentlyContinue
-          }
-          if (-not $python) {
-            Write-Error "python or python3 is required for bootstrapswarm"
+            Write-Error "python3.exe is required for bootstrapswarm"
             exit 1
           }
 

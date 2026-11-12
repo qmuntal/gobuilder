@@ -23,7 +23,7 @@ The scheduler workflow defaults to dispatching `builder-windows-arm64.yml`. Its 
 
 Before dispatching, the scheduler counts active `builder-windows-arm64` workflow runs in GitHub Actions and reads their stable `bot_index` slots from the workflow run name. It starts only the remaining capacity up to `--max-jobs` and passes each new workflow the first free two-digit slot. The builder workflow uses that index as the suffix of the LUCI composite bot ID, keeping the bot pages stable in the LUCI UI while still allowing multiple concurrent slots. If an active workflow run does not expose a parseable slot, the scheduler dispatches no new builders rather than risk reusing an occupied bot ID.
 
-Active runs are deduplicated by GitHub run ID across status queries. Slots are read from the ` bot NN` suffix of the run name, independently of whether `--workflow` is a filename or a numeric ID.
+The scheduler reads one unfiltered, paginated workflow-run listing and counts active statuses locally, deduplicating by GitHub run ID across pages. Slots are read from the ` bot NN` suffix of the run name, independently of whether `--workflow` is a filename or a numeric ID. History scans are limited to 100 pages of 100 runs; if the full history cannot be read within that bound, scheduling fails without dispatching builders.
 
 Manual `builder-windows-arm64` workflow dispatches default to slot `99`; scheduler-dispatched runs use the first free slot in the configured active range. Slot inputs must be exactly two ASCII digits from `01` to `99`, with no surrounding whitespace.
 
@@ -34,6 +34,8 @@ Design details are documented in [DESIGN.md](DESIGN.md). Security hardening deta
 The `builder-windows-arm64` workflow follows the Go dashboard builder setup by minting a LUCI machine token with `luci_machine_tokend` and starting the Swarming bot with `bootstrapswarm`. Before it can work, the builder must be approved and defined by the Go team in LUCI.
 
 The `builder-windows-arm64` workflow runs on a Windows ARM64 runner. It downloads `luci_machine_tokend.exe` and `bootstrapswarm.exe` from `go-builder-data`, matching the Azure Windows ARM64 setup in `golang/build`. The Swarming bot handles CIPD-managed payloads after it starts.
+
+The runner must provide `python3.exe` on `PATH`. The workflow checks this before provisioning because the pinned bootstrap executable launches Python by that name; `python.exe` alone is not sufficient.
 
 The certificate and private key are only used while minting `token.json`; the workflow deletes those PEM files before starting `bootstrapswarm`. The token is written to `C:\luci_machine_tokend\token.json`, which is `bootstrapswarm`'s default Windows token path, and the local `swarming` user is granted read access to it.
 

@@ -80,9 +80,9 @@ The GitHub client counts runs in these statuses:
 - `waiting`
 - `pending`
 
-Every run returned by the workflow-specific endpoint counts as active, regardless of its display title. Runs are deduplicated by GitHub run ID across pages and status queries, so a run changing status is counted only once. Missing or nonpositive run IDs cause an error rather than risking incorrect deduplication.
+The client reads one unfiltered, paginated listing from the workflow-specific endpoint and classifies each run by its returned status. Completed runs are ignored; all active runs count regardless of their display title. Missing or unrecognized statuses cause an error rather than risking an undercount. Runs are deduplicated by GitHub run ID across pages. Missing or nonpositive run IDs cause an error rather than risking incorrect deduplication.
 
-Rationale: queued or waiting GitHub Actions runs already represent requested capacity. Counting only running jobs would over-dispatch while GitHub is still placing jobs.
+Rationale: queued or waiting GitHub Actions runs already represent requested capacity. Counting only running jobs would over-dispatch while GitHub is still placing jobs. Reading one listing avoids losing a run that changes between active statuses while separate status-filtered queries are being made.
 
 Result: `--max-jobs` means maximum active builder workflow slots, not maximum newly dispatched jobs per scheduler tick.
 
@@ -192,7 +192,7 @@ Result: the longest builder phase is `Register LUCI builder`, currently limited 
 
 ### Pagination And Response Bounds
 
-Decision: GitHub workflow-run pagination is capped, Buildbucket response bodies are size-limited, and repeated Buildbucket page tokens fail the scheduler run.
+Decision: GitHub workflow-run history scans are capped at 100 pages of 100 runs. Histories exceeding that limit, shrinking run counts, and prematurely empty pages fail the scheduler run rather than returning an incomplete active-run count. Growing histories are paginated using the latest reported count. Buildbucket response bodies are size-limited, and all previously seen page tokens are tracked so both immediate repeats and longer pagination cycles fail the scheduler run.
 
 Rationale: API clients should have explicit bounds even when services behave unexpectedly.
 
@@ -231,6 +231,14 @@ Decision: `luci_machine_tokend.exe` and `bootstrapswarm.exe` are downloaded from
 Rationale: these match the Windows ARM64 LUCI setup used by the Go builder infrastructure.
 
 Result: the workflow follows the existing LUCI bootstrap path rather than carrying local copies of the tools.
+
+### Python Interpreter
+
+Decision: the builder workflow requires an application named `python3.exe` on `PATH`, without falling back to `python.exe`.
+
+Rationale: the pinned `bootstrapswarm.exe` launches `python3` by name. Finding a differently named interpreter during setup would not satisfy that requirement.
+
+Result: a missing interpreter fails the setup step before Swarming user creation or credential handling.
 
 ### `pywin32`
 

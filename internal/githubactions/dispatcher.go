@@ -16,6 +16,7 @@ import (
 const (
 	DefaultAPIURL       = "https://api.github.com"
 	maxWorkflowRunPages = 100
+	workflowRunPageSize = 100
 )
 
 type Dispatcher struct {
@@ -31,8 +32,6 @@ type DispatchRequest struct {
 	Inputs   map[string]string
 }
 
-var activeWorkflowRunStatuses = []string{"requested", "queued", "in_progress", "waiting", "pending"}
-
 type ActiveWorkflowRuns struct {
 	Count        int
 	BotIndexes   map[int]int
@@ -47,31 +46,36 @@ func (dispatcher Dispatcher) ActiveWorkflowRuns(ctx context.Context, workflow st
 		return ActiveWorkflowRuns{}, fmt.Errorf("github token is required")
 	}
 
-	workflow = strings.TrimSpace(workflow)
+	runs, err := dispatcher.workflowRuns(ctx, strings.TrimSpace(workflow))
+	if err != nil {
+		return ActiveWorkflowRuns{}, err
+	}
+
 	activeRuns := ActiveWorkflowRuns{BotIndexes: map[int]int{}}
 	seenRunIDs := map[int64]bool{}
-	for _, status := range activeWorkflowRunStatuses {
-		runs, err := dispatcher.workflowRuns(ctx, workflow, status)
-		if err != nil {
-			return ActiveWorkflowRuns{}, err
+	for _, run := range runs.Runs {
+		if run.ID <= 0 {
+			return ActiveWorkflowRuns{}, fmt.Errorf("github workflow runs query returned invalid run ID %d", run.ID)
 		}
-		for _, run := range runs.Runs {
-			if run.ID <= 0 {
-				return ActiveWorkflowRuns{}, fmt.Errorf("github workflow runs query returned invalid run ID %d", run.ID)
-			}
-			if seenRunIDs[run.ID] {
-				continue
-			}
-			seenRunIDs[run.ID] = true
-			activeRuns.Count++
+		switch run.Status {
+		case "completed":
+			continue
+		case "requested", "queued", "in_progress", "waiting", "pending":
+		default:
+			return ActiveWorkflowRuns{}, fmt.Errorf("github workflow run %d has unexpected status %q", run.ID, run.Status)
+		}
+		if seenRunIDs[run.ID] {
+			continue
+		}
+		seenRunIDs[run.ID] = true
+		activeRuns.Count++
 
-			botIndex, ok := parseWorkflowRunBotIndex(run.DisplayTitle)
-			if !ok {
-				activeRuns.UnknownCount++
-				continue
-			}
-			activeRuns.BotIndexes[botIndex]++
+		botIndex, ok := parseWorkflowRunBotIndex(run.DisplayTitle)
+		if !ok {
+			activeRuns.UnknownCount++
+			continue
 		}
+		activeRuns.BotIndexes[botIndex]++
 	}
 	return activeRuns, nil
 }
@@ -84,9 +88,10 @@ type workflowRunsResponse struct {
 type workflowRun struct {
 	ID           int64  `json:"id"`
 	DisplayTitle string `json:"display_title"`
+	Status       string `json:"status"`
 }
 
-func (dispatcher Dispatcher) workflowRuns(ctx context.Context, workflow, status string) (workflowRunsResponse, error) {
+func (dispatcher Dispatcher) workflowRuns(ctx context.Context, workflow string) (workflowRunsResponse, error) {
 	owner, repositoryName, err := splitRepository(dispatcher.Repository)
 	if err != nil {
 		return workflowRunsResponse{}, err
@@ -107,19 +112,28 @@ func (dispatcher Dispatcher) workflowRuns(ctx context.Context, workflow, status 
 	var allRuns workflowRunsResponse
 	for page := 1; page <= maxWorkflowRunPages; page++ {
 		query := url.Values{}
-		query.Set("status", status)
-		query.Set("per_page", "100")
+		query.Set("per_page", strconv.Itoa(workflowRunPageSize))
 		query.Set("page", strconv.Itoa(page))
 
 		pageResponse, err := dispatcher.workflowRunsPage(ctx, requestURL+"?"+query.Encode())
 		if err != nil {
 			return workflowRunsResponse{}, err
 		}
-		if page == 1 {
-			allRuns.TotalCount = pageResponse.TotalCount
+		if pageResponse.TotalCount < len(pageResponse.Runs) {
+			return workflowRunsResponse{}, fmt.Errorf("github workflow runs query returned invalid total count %d", pageResponse.TotalCount)
+		}
+		if pageResponse.TotalCount > maxWorkflowRunPages*workflowRunPageSize {
+			return workflowRunsResponse{}, fmt.Errorf("github workflow run history exceeds %d runs", maxWorkflowRunPages*workflowRunPageSize)
+		}
+		if pageResponse.TotalCount < allRuns.TotalCount {
+			return workflowRunsResponse{}, fmt.Errorf("github workflow run count decreased during pagination")
+		}
+		allRuns.TotalCount = pageResponse.TotalCount
+		if len(pageResponse.Runs) == 0 && len(allRuns.Runs) < allRuns.TotalCount {
+			return workflowRunsResponse{}, fmt.Errorf("github workflow runs query ended before all runs were listed")
 		}
 		allRuns.Runs = append(allRuns.Runs, pageResponse.Runs...)
-		if len(pageResponse.Runs) == 0 || len(allRuns.Runs) >= allRuns.TotalCount {
+		if len(allRuns.Runs) >= allRuns.TotalCount {
 			return allRuns, nil
 		}
 	}

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -90,6 +92,49 @@ func TestQueueCountsAllBuildsWithoutBuilderFilter(testingContext *testing.T) {
 
 	if count := queue.countMatchingBuilds(builds); count != 2 {
 		testingContext.Fatalf("countMatchingBuilds() = %d, want 2", count)
+	}
+}
+
+func TestQueueRejectsRepeatedPageTokens(testingContext *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		tokens []string
+	}{
+		{name: "immediate repeat", tokens: []string{"a", "a"}},
+		{name: "two-token cycle", tokens: []string{"a", "b", "a"}},
+		{name: "three-token cycle", tokens: []string{"a", "b", "c", "a"}},
+	} {
+		testingContext.Run(testCase.name, func(testingContext *testing.T) {
+			var requestCount atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+				requestIndex := int(requestCount.Add(1)) - 1
+				if requestIndex >= len(testCase.tokens) {
+					http.Error(responseWriter, "unexpected extra page request", http.StatusInternalServerError)
+					return
+				}
+				responseWriter.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(responseWriter).Encode(searchBuildsResponse{
+					NextPageToken: testCase.tokens[requestIndex],
+				})
+			}))
+			defer server.Close()
+
+			queue, err := NewQueue(QueueConfig{
+				BaseURL:    server.URL,
+				Project:    "golang",
+				HTTPClient: server.Client(),
+			})
+			if err != nil {
+				testingContext.Fatalf("NewQueue() error = %v", err)
+			}
+			_, err = queue.JobsInQueue(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "repeated page token") {
+				testingContext.Fatalf("JobsInQueue() error = %v, want repeated page token error", err)
+			}
+			if got := int(requestCount.Load()); got != len(testCase.tokens) {
+				testingContext.Fatalf("request count = %d, want %d", got, len(testCase.tokens))
+			}
+		})
 	}
 }
 
