@@ -2,12 +2,14 @@
 
 ## GitHub Actions
 
-This repository has two workflows:
+This repository has the following workflows:
 
 - `scheduler` is declared with a 5-minute cron and can also be started manually. It runs the Go scheduler in `cmd/scheduler`. GitHub may delay or throttle scheduled workflows.
 - `builder-windows-arm64` is started by the scheduler and starts a LUCI Swarming bot.
+- `cache-windows-arm64` populates the compiler and Python-wheel caches without using the LUCI environment.
+- `verify-dependency-pins` checks that dependency pins and cache paths stay synchronized on Dependabot pull requests.
 
-The `builder-windows-arm64` workflow declares `permissions: {}` so the default `GITHUB_TOKEN` has no repository permissions. The `scheduler` workflow grants `contents: read` to check out the Go source and `actions: write` to dispatch the builder workflow in the same repository with the built-in token.
+The `builder-windows-arm64` and `cache-windows-arm64` workflows declare `permissions: {}` so the default `GITHUB_TOKEN` has no repository permissions. Only the builder uses the `luci-builder-windows-arm64` environment. The `scheduler` workflow grants `contents: read` to check out the Go source and `actions: write` to dispatch the builder workflow in the same repository with the built-in token.
 
 The `scheduler` workflow uses a single GitHub Actions concurrency group, so overlapping scheduled or manual scheduler runs do not allocate builder slots at the same time.
 
@@ -29,6 +31,14 @@ Manual `builder-windows-arm64` workflow dispatches default to slot `99`; schedul
 
 Design details are documented in [DESIGN.md](DESIGN.md). Security hardening details are documented in [DESIGN-SECURITY.MD](DESIGN-SECURITY.MD).
 
+## Builder caches
+
+Run `cache-windows-arm64` on `main` before starting builders. It also runs daily at 03:23 UTC and on pushes to `main` that change either the cache or builder workflow. It needs no LUCI environment approval or credentials.
+
+The cache workflow downloads and SHA-256 verifies `llvm-mingw`, then downloads the pinned `pywin32` wheel for the runner's Python version. Compiler cache keys include the version and archive hash; wheel cache keys include the Python and `pywin32` versions. Both workflows must use matching dependency pins and cache paths.
+
+Builders only restore these caches, and install `pywin32` offline from the cached wheels. `cache-mode: read` makes this restriction enforceable by GitHub's cache service, independently of `GITHUB_TOKEN` permissions. The population workflow uses `cache-mode: write` to allow both restores and saves. A missing cache fails the builder before Swarming user creation or credential handling; rerun `cache-windows-arm64` on `main` after cache eviction or a runner Python update. The older compiler and pip cache keys are not reused, so this workflow must populate the new keys once when this change is deployed.
+
 ## LUCI builder setup
 
 The `builder-windows-arm64` workflow follows the Go dashboard builder setup by minting a LUCI machine token with `luci_machine_tokend` and starting the Swarming bot with `bootstrapswarm`. Before it can work, the builder must be approved and defined by the Go team in LUCI.
@@ -41,11 +51,11 @@ The certificate and private key are only used while minting `token.json`; the wo
 
 The workflow registers each GitHub Actions run as a LUCI composite bot ID of the form `windows-arm64-azure-qmuntal--NN`, where `NN` is the stable `bot_index` slot. LUCI Swarming uses the suffix after `--` as the bot slot identifier, while the host identity used for bot auth and bot group lookup is the base `windows-arm64-azure-qmuntal`. The LUCI bot certificate and bots.cfg entry should therefore be issued/configured for the base hostname, not for a single suffixed slot.
 
-Required repository variables:
+Configure the following variable in the `luci-builder-windows-arm64` environment:
 
 - `LUCI_BOT_CERT_PEM`: certificate PEM issued by the Go team
 
-Required repository secrets:
+Configure the following secret in the same environment:
 
 - `LUCI_BOT_KEY_PEM`: private key PEM generated with `genbotcert`; it should contain an `RSA PRIVATE KEY` PEM block
 

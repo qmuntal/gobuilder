@@ -1,0 +1,95 @@
+name: cache-windows-arm64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/cache-windows-arm64.yml
+      - .github/workflows/builder-windows-arm64.yml
+  schedule:
+    - cron: "23 3 * * *"
+
+permissions: {}
+cache-mode: write
+
+concurrency:
+  group: cache-windows-arm64-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  populate:
+    runs-on: windows-11-arm
+    env:
+      LLVM_MINGW_VERSION: "20250514"
+      LLVM_MINGW_DIR: C:\llvm-mingw
+      LLVM_MINGW_SHA256: d5b609a7f2857eac0c035e290a77012e177f58444f5cfa27c649d766c2d8c1d1
+      PYWIN32_VERSION: "312"
+      PYWIN32_WHEEL_DIR: C:\pywin32-wheels
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Cache llvm-mingw toolchain
+        id: cache-llvm-mingw
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        timeout-minutes: 10
+        with:
+          path: ${{ env.LLVM_MINGW_DIR }}
+          key: llvm-mingw-windows-arm64-${{ env.LLVM_MINGW_VERSION }}-${{ env.LLVM_MINGW_SHA256 }}
+
+      - name: Install llvm-mingw toolchain
+        if: steps.cache-llvm-mingw.outputs.cache-hit != 'true'
+        timeout-minutes: 20
+        run: |
+          $archive = "llvm-mingw-$($env:LLVM_MINGW_VERSION)-ucrt-aarch64.zip"
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$($env:LLVM_MINGW_VERSION)/${archive}"
+          $archivePath = Join-Path $env:RUNNER_TEMP $archive
+
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile $archivePath -UseBasicParsing
+          $actualHash = (Get-FileHash -Algorithm SHA256 -Path $archivePath).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:LLVM_MINGW_SHA256) {
+            throw "$archive SHA256 mismatch: got $actualHash, want $env:LLVM_MINGW_SHA256"
+          }
+
+          Write-Host "Extracting to $env:LLVM_MINGW_DIR"
+          Expand-Archive -Path $archivePath -DestinationPath "C:\"
+          Rename-Item "C:\llvm-mingw-$($env:LLVM_MINGW_VERSION)-ucrt-aarch64" $env:LLVM_MINGW_DIR
+
+      - name: Check llvm-mingw toolchain
+        timeout-minutes: 2
+        run: |
+          & (Join-Path $env:LLVM_MINGW_DIR "bin\gcc.exe") --version
+
+      - name: Locate Python
+        id: python
+        timeout-minutes: 2
+        run: |
+          $python = Get-Command python3.exe -CommandType Application -ErrorAction SilentlyContinue
+          if (-not $python) {
+            Write-Error "python3.exe is required to populate the pywin32 cache"
+            exit 1
+          }
+
+          $version = & $python.Source -c "import platform; print(platform.python_version())"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "PYTHON_EXE=$($python.Source)"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
+
+      - name: Cache pywin32 wheels
+        id: cache-pywin32
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        timeout-minutes: 10
+        with:
+          path: ${{ env.PYWIN32_WHEEL_DIR }}
+          key: pywin32-windows-arm64-${{ steps.python.outputs.version }}-${{ env.PYWIN32_VERSION }}
+
+      - name: Download pywin32 wheels
+        if: steps.cache-pywin32.outputs.cache-hit != 'true'
+        timeout-minutes: 5
+        run: |
+          & $env:PYTHON_EXE -m pip download --disable-pip-version-check --only-binary=:all: --dest "$env:PYWIN32_WHEEL_DIR" "pywin32==$env:PYWIN32_VERSION"

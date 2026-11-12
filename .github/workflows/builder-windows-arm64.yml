@@ -11,6 +11,7 @@ on:
         default: "99"
 
 permissions: {}
+cache-mode: read
 
 jobs:
   luci:
@@ -30,6 +31,7 @@ jobs:
       LUCI_MACHINE_TOKEN_FILE: C:\luci_machine_tokend\token.json
       LUCI_TOOL_ROOT: C:\golang
       PYWIN32_VERSION: "312"
+      PYWIN32_WHEEL_DIR: C:\pywin32-wheels
       SWARMING_USER: swarming
       SWARMING_WORKDIR: C:\b
     defaults:
@@ -79,30 +81,13 @@ jobs:
           '@ | Set-Content -Path $scriptPath -Encoding ASCII
           Add-Content -Path $env:GITHUB_ENV -Value "VERIFIED_DOWNLOAD_SCRIPT=$scriptPath"
 
-      - name: Cache llvm-mingw toolchain
-        id: cache-llvm-mingw
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+      - name: Restore llvm-mingw toolchain
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         timeout-minutes: 10
         with:
           path: ${{ env.LLVM_MINGW_DIR }}
-          key: llvm-mingw-windows-arm64-${{ env.LLVM_MINGW_VERSION }}
-
-      - name: Install llvm-mingw toolchain
-        if: steps.cache-llvm-mingw.outputs.cache-hit != 'true'
-        timeout-minutes: 20
-        run: |
-          # Go's CGO on Windows expects a MinGW-compatible C toolchain.
-          # The Azure startup.ps1 notes that LUCI builders get compilers
-          # via CIPD; for GitHub Actions we download llvm-mingw directly.
-          $archive = "llvm-mingw-$($env:LLVM_MINGW_VERSION)-ucrt-aarch64.zip"
-          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$($env:LLVM_MINGW_VERSION)/${archive}"
-
-          & $env:VERIFIED_DOWNLOAD_SCRIPT -Uri $url -OutFile "$env:TEMP\$archive" -Sha256 $env:LLVM_MINGW_SHA256
-
-          Write-Host "Extracting to $env:LLVM_MINGW_DIR"
-          Remove-Item -Recurse -Force $env:LLVM_MINGW_DIR -ErrorAction SilentlyContinue
-          Expand-Archive -Path "$env:TEMP\$archive" -DestinationPath "C:\"
-          Rename-Item "C:\llvm-mingw-$($env:LLVM_MINGW_VERSION)-ucrt-aarch64" $env:LLVM_MINGW_DIR
+          key: llvm-mingw-windows-arm64-${{ env.LLVM_MINGW_VERSION }}-${{ env.LLVM_MINGW_SHA256 }}
+          fail-on-cache-miss: true
 
       - name: Add llvm-mingw to PATH
         timeout-minutes: 2
@@ -157,27 +142,29 @@ jobs:
           }
 
           $version = & $python.Source -c "import platform; print(platform.python_version())"
-          $cacheDir = & $python.Source -m pip cache dir
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
           $pythonDir = Split-Path -Parent $python.Source
           $machinePath = [Environment]::GetEnvironmentVariable("PATH", [EnvironmentVariableTarget]::Machine)
           if (($machinePath -split ";") -notcontains $pythonDir) {
             [Environment]::SetEnvironmentVariable("PATH", "$pythonDir;$machinePath", [EnvironmentVariableTarget]::Machine)
           }
           Add-Content -Path $env:GITHUB_ENV -Value "PYTHON_EXE=$($python.Source)"
-          Add-Content -Path $env:GITHUB_ENV -Value "PIP_CACHE_DIR=$cacheDir"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
 
-      - name: Cache pip packages
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+      - name: Restore pywin32 wheels
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         timeout-minutes: 10
         with:
-          path: ${{ env.PIP_CACHE_DIR }}
-          key: pip-windows-arm64-${{ steps.python.outputs.version }}-pywin32
+          path: ${{ env.PYWIN32_WHEEL_DIR }}
+          key: pywin32-windows-arm64-${{ steps.python.outputs.version }}-${{ env.PYWIN32_VERSION }}
+          fail-on-cache-miss: true
 
       - name: Install pywin32
         timeout-minutes: 5
         run: |
-          & $env:PYTHON_EXE -m pip install --disable-pip-version-check --only-binary=:all: "pywin32==$env:PYWIN32_VERSION"
+          & $env:PYTHON_EXE -m pip install --disable-pip-version-check --no-index --find-links "$env:PYWIN32_WHEEL_DIR" --only-binary=:all: "pywin32==$env:PYWIN32_VERSION"
 
       - name: Prepare swarming user
         timeout-minutes: 5

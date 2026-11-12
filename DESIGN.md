@@ -8,7 +8,8 @@ The system provides temporary Windows ARM64 LUCI Swarming capacity for the Go pr
 
 - `scheduler` workflow: runs every 5 minutes and can also be started manually. It builds and runs `cmd/scheduler` on Ubuntu.
 - `builder-windows-arm64` workflow: starts a Windows ARM64 runner and registers it as a LUCI Swarming bot.
-- `verify-dependency-pins` workflow: checks Dependabot pull requests that update the mirrored `pywin32` requirements file.
+- `cache-windows-arm64` workflow: populates compiler and Python-wheel caches without the LUCI environment.
+- `verify-dependency-pins` workflow: checks dependency pins and cache paths in both Windows ARM64 workflows on Dependabot pull requests.
 - `cmd/scheduler`: command-line entry point for querying Buildbucket and dispatching builder workflows.
 - `internal/buildbucket`: Buildbucket queue client.
 - `internal/githubactions`: GitHub Actions dispatch and active-run client.
@@ -21,7 +22,7 @@ The system provides temporary Windows ARM64 LUCI Swarming capacity for the Go pr
 3. The scheduler queries Buildbucket for `SCHEDULED` Go LUCI builds.
 4. The scheduler queries GitHub Actions for active runs of the target builder workflow.
 5. The scheduler computes free builder slots and dispatches one builder workflow run per selected slot.
-6. Each builder workflow run validates its `bot_index`, derives its LUCI hostname, prepares the Windows runner, mints a LUCI machine token, and starts `bootstrapswarm.exe`.
+6. Each builder workflow run validates its `bot_index`, derives its LUCI hostname, restores the pre-populated dependency caches, prepares the Windows runner, mints a LUCI machine token, and starts `bootstrapswarm.exe`.
 
 ## Workflow Design
 
@@ -48,6 +49,14 @@ Decision: `builder-windows-arm64` is started by `workflow_dispatch`.
 Rationale: builder runs should be created by the scheduler or by an explicit manual operation, not by pushes or pull requests.
 
 Result: the builder workflow is an on-demand capacity unit rather than a normal CI workflow.
+
+### Separate Cache Population
+
+Decision: `cache-windows-arm64` populates dependency caches on a separate Windows ARM64 runner with no GitHub environment, LUCI credentials, or repository checkout. It runs manually, daily at 03:23 UTC, and on pushes to `main` that change either Windows ARM64 workflow. Per-ref concurrency prevents overlapping population runs.
+
+Rationale: cache creation should not require LUCI environment approval, depend on a successful Swarming run, or upload files after the bot has executed build tasks.
+
+Result: the credentialed builder uses `actions/cache/restore` with exact versioned keys and fails on a cache miss. Its `cache-mode: read` is enforced by the cache service; the population workflow uses `cache-mode: write` so it can check existing caches and save missing ones. Cache population must run on `main` before builders use new keys, and after eviction or a runner Python update. There is no in-builder download fallback or cache-save step.
 
 ## Scheduler Design
 
@@ -218,7 +227,7 @@ Result: updates are explicit diffs in workflow files.
 
 ### `llvm-mingw`
 
-Decision: the builder workflow installs `llvm-mingw` directly on the Windows ARM64 runner and caches `C:\llvm-mingw` by `LLVM_MINGW_VERSION`.
+Decision: the cache workflow downloads and verifies `llvm-mingw`, then caches `C:\llvm-mingw` by `LLVM_MINGW_VERSION` and `LLVM_MINGW_SHA256`. The builder only restores that cache and adds the compiler to the process and Machine paths.
 
 Rationale: Go's CGO tests on Windows need a MinGW-compatible C toolchain, and the GitHub-hosted runner does not provide the same CIPD-provisioned compiler layout as LUCI builders.
 
@@ -234,7 +243,7 @@ Result: the workflow follows the existing LUCI bootstrap path rather than carryi
 
 ### Python Interpreter
 
-Decision: the builder workflow requires an application named `python3.exe` on `PATH`, without falling back to `python.exe`.
+Decision: both Windows ARM64 workflows require an application named `python3.exe` on `PATH`, without falling back to `python.exe`.
 
 Rationale: the pinned `bootstrapswarm.exe` launches `python3` by name. Finding a differently named interpreter during setup would not satisfy that requirement.
 
@@ -242,19 +251,19 @@ Result: a missing interpreter fails the setup step before Swarming user creation
 
 ### `pywin32`
 
-Decision: `pywin32` is pinned by `PYWIN32_VERSION`, installed wheel-only, and mirrored in `.github/requirements-builder-windows-arm64.txt` for Dependabot.
+Decision: `pywin32` is pinned by `PYWIN32_VERSION` in both Windows ARM64 workflows and mirrored in `.github/requirements-builder-windows-arm64.txt` for Dependabot. The cache workflow uses `pip download --only-binary=:all:` to populate `C:\pywin32-wheels`, keyed by the Python and `pywin32` versions. The builder installs from the restored wheels with `--no-index`.
 
 Rationale: `bootstrapswarm.exe` needs Python Windows integration, but the builder workflow should not check out the repository just to read a dependency file. The requirements file exists as update metadata.
 
-Result: Dependabot can discover `pywin32` updates, and `verify-dependency-pins` requires Dependabot pull requests to keep the workflow pin synchronized.
+Result: Dependabot can discover `pywin32` updates, and `verify-dependency-pins` requires Dependabot pull requests to keep both workflow pins synchronized. The builder does not contact PyPI or save the pip cache.
 
 ### Dependency Update Flow
 
-Decision: runtime dependency pins live in the workflow environment; Dependabot-visible metadata may mirror those pins when required by tooling.
+Decision: runtime dependency pins live in the workflow environment; Dependabot-visible metadata may mirror those pins when required by tooling. Dependency pins and cache paths shared by the cache and builder workflows must match.
 
 Rationale: the builder workflow is intentionally self-contained. Update automation should not force the credentialed builder job to depend on checked-out repository files.
 
-Result: updates to mirrored dependencies require both metadata and runtime workflow pin changes.
+Result: updates to mirrored dependencies require metadata and both runtime workflow pin changes. The existing Dependabot check verifies the shared compiler version/hash, Python dependency version, and cache paths. New cache keys must be populated before the corresponding builders can start.
 
 ## Runner Preparation
 

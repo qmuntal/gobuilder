@@ -5,13 +5,14 @@ on:
     paths:
       - .github/requirements-builder-windows-arm64.txt
       - .github/workflows/builder-windows-arm64.yml
+      - .github/workflows/cache-windows-arm64.yml
       - .github/workflows/verify-dependency-pins.yml
 
 permissions:
   contents: read
 
 jobs:
-  pywin32:
+  builder-dependencies:
     if: github.event.pull_request.user.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
@@ -21,7 +22,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Verify pywin32 pin sync
+      - name: Verify builder dependency pin sync
         timeout-minutes: 2
         run: |
           python - <<'PY'
@@ -30,29 +31,46 @@ jobs:
           import sys
 
           requirements_path = pathlib.Path('.github/requirements-builder-windows-arm64.txt')
-          workflow_path = pathlib.Path('.github/workflows/builder-windows-arm64.yml')
+          workflow_paths = [
+              pathlib.Path('.github/workflows/builder-windows-arm64.yml'),
+              pathlib.Path('.github/workflows/cache-windows-arm64.yml'),
+          ]
+          cache_pins = [
+              'LLVM_MINGW_VERSION', 'LLVM_MINGW_DIR', 'LLVM_MINGW_SHA256',
+              'PYWIN32_VERSION', 'PYWIN32_WHEEL_DIR',
+          ]
 
           requirements = requirements_path.read_text(encoding='utf-8')
-          workflow = workflow_path.read_text(encoding='utf-8')
-
           requirements_match = re.search(r'(?m)^pywin32==([0-9]+)\s*$', requirements)
-          workflow_match = re.search(r'(?m)^\s*PYWIN32_VERSION:\s*"?([0-9]+)"?\s*$', workflow)
-
           if not requirements_match:
               print(f'::error file={requirements_path}::missing pywin32==VERSION pin')
               sys.exit(1)
-          if not workflow_match:
-              print(f'::error file={workflow_path}::missing PYWIN32_VERSION workflow env')
-              sys.exit(1)
-
           requirements_version = requirements_match.group(1)
-          workflow_version = workflow_match.group(1)
-          if requirements_version != workflow_version:
-              print(
-                  f'::error file={workflow_path}::PYWIN32_VERSION={workflow_version} '
-                  f'must match {requirements_path} pywin32=={requirements_version}'
-              )
-              sys.exit(1)
 
-          print(f'pywin32 pin is synchronized at {workflow_version}')
+          reference_pins = None
+          for workflow_path in workflow_paths:
+              workflow = workflow_path.read_text(encoding='utf-8')
+              pins = {}
+              for name in cache_pins:
+                  match = re.search(rf'(?m)^      {name}:[ \t]*"?([^"\r\n]+?)"?[ \t]*$', workflow)
+                  if not match:
+                      print(f'::error file={workflow_path}::missing {name} workflow env')
+                      sys.exit(1)
+                  pins[name] = match.group(1)
+
+              if pins['PYWIN32_VERSION'] != requirements_version:
+                  print(
+                      f'::error file={workflow_path}::PYWIN32_VERSION={pins["PYWIN32_VERSION"]} '
+                      f'must match {requirements_path} pywin32=={requirements_version}'
+                  )
+                  sys.exit(1)
+
+              if reference_pins is not None:
+                  for name in cache_pins:
+                      if pins[name] != reference_pins[name]:
+                          print(f'::error file={workflow_path}::{name} must match {workflow_paths[0]}')
+                          sys.exit(1)
+              reference_pins = pins
+
+          print(f'Builder cache pins are synchronized; pywin32=={requirements_version}')
           PY

@@ -9,6 +9,7 @@ The central security goal is to let a GitHub-hosted Windows ARM64 runner tempora
 Covered components:
 
 - `.github/workflows/builder-windows-arm64.yml`
+- `.github/workflows/cache-windows-arm64.yml`
 - `.github/workflows/scheduler.yml`
 - `.github/workflows/verify-dependency-pins.yml`
 - `.github/dependabot.yml`
@@ -44,6 +45,7 @@ The design treats these boundaries as security-relevant:
 - GitHub APIs to local scheduler code.
 - Buildbucket API to local scheduler code.
 - Downloaded third-party artifacts to the runner.
+- The uncredentialed cache-population workflow to the credentialed builder through shared Actions caches.
 - LUCI token minting to the Swarming bot process.
 - GitHub Dependabot metadata to the actual builder workflow runtime.
 
@@ -63,6 +65,8 @@ flowchart LR
 	subgraph actions[GitHub Actions]
 		scheduler[scheduler workflow]
 		builder[builder-windows-arm64 workflow]
+		cacheWorkflow[cache-windows-arm64 workflow]
+		dependencyCache[Actions dependency caches]
 		verify[verify-dependency-pins workflow]
 	end
 
@@ -83,13 +87,17 @@ flowchart LR
 	dependabot --> verify
 	workflows --> scheduler
 	workflows --> builder
+	workflows --> cacheWorkflow
 	schedulerCode --> scheduler
 	scheduler --> githubAPI
 	scheduler --> buildbucket
 	scheduler --> builder
 	verify --> workflows
 	verify --> requirements
-	builder --> pypi
+	cacheWorkflow --> pypi
+	cacheWorkflow --> toolDownloads
+	cacheWorkflow --> dependencyCache
+	dependencyCache --> builder
 	builder --> toolDownloads
 	builder --> tokend
 	tokend --> luciToken
@@ -158,6 +166,7 @@ Pinned actions include:
 - `actions/checkout`
 - `actions/setup-go`
 - `actions/cache`
+- `actions/cache/restore`
 
 Rationale: tags can move. A commit SHA identifies the exact action code reviewed at the time of pinning.
 
@@ -167,7 +176,7 @@ Residual risk: the pinned commit can still contain a vulnerability, and future s
 
 ### 6. Non-marketplace executable downloads are SHA-256 verified
 
-Decision: the builder workflow creates a local `Save-VerifiedDownload.ps1` helper and verifies SHA-256 before using downloaded artifacts.
+Decision: the cache workflow verifies the `llvm-mingw` archive's SHA-256 before extracting it. The builder workflow creates a local `Save-VerifiedDownload.ps1` helper to verify the LUCI tools before using them.
 
 Verified artifacts include:
 
@@ -183,7 +192,7 @@ Residual risk: if a malicious artifact hash is committed to the workflow, the ch
 
 ### 7. `pywin32` is pinned without making the builder read repository files
 
-Decision: `pywin32` is installed as `pywin32==$PYWIN32_VERSION` with `--only-binary=:all:`. `.github/requirements-builder-windows-arm64.txt` mirrors that pin only so Dependabot can discover updates. The builder workflow still uses `PYWIN32_VERSION` directly and does not read the requirements file. `verify-dependency-pins` runs on Dependabot pull requests and fails when the mirrored requirements pin and `PYWIN32_VERSION` disagree.
+Decision: the uncredentialed cache workflow downloads `pywin32==$PYWIN32_VERSION` with `--only-binary=:all:`. The builder installs the same pin offline from the restored wheels using `--no-index`. `.github/requirements-builder-windows-arm64.txt` mirrors that pin only so Dependabot can discover updates. Neither Windows ARM64 workflow reads the requirements file. `verify-dependency-pins` runs on Dependabot pull requests and fails when either workflow's pin disagrees with the requirements.
 
 Rationale: `bootstrapswarm.exe` needs Python Windows integration. Pinning gives reproducible dependency selection, and wheel-only installation avoids arbitrary source build steps during the builder workflow. Dependabot understands requirements files, but the secret-bearing builder workflow should not check out the repository just to read a dependency pin. The sync check forces the workflow pin update to be an intentional reviewer-visible change.
 
@@ -251,13 +260,24 @@ Security effect: limits the exposure window for credentials and runner resources
 
 Residual risk: the Swarming bot can still run for up to the configured step timeout once registered.
 
+### 14. Cache population does not use the LUCI environment
+
+Decision: `cache-windows-arm64` has `permissions: {}`, no `environment`, no secret references, and no repository checkout. Its `cache-mode: write` permits restores and saves. The builder remains in the `luci-builder-windows-arm64` environment, declares `cache-mode: read`, and uses restore-only actions with no fallback keys.
+
+Rationale: dependency cache creation should be independent of LUCI approval and execution. Successful bot execution should not trigger uploads of cache contents from a machine that has handled credentials or run LUCI tasks.
+
+Security effect: cache population cannot access the LUCI environment's credentials, and GitHub's cache service enforces read-only access for the builder through scoped cache tokens. This is separate from `GITHUB_TOKEN` permissions and does not rely solely on using restore-only actions. Compiler keys include the verified archive hash; wheel keys include both dependency and interpreter versions.
+
+Residual risk: Actions caches and workflows that can write them remain trusted infrastructure. A missing cache fails the builder until the independent workflow repopulates it.
+
 ## Dependency Update Procedure
 
 When updating `llvm-mingw`:
 
-- Update `LLVM_MINGW_VERSION`.
-- Update `LLVM_MINGW_SHA256` to the SHA-256 of the exact archive used by the workflow.
+- Update `LLVM_MINGW_VERSION` in both Windows ARM64 workflows.
+- Update `LLVM_MINGW_SHA256` in both workflows to the SHA-256 of the exact archive used by the cache workflow.
 - Review the upstream release source before changing the hash.
+- Populate the new cache key on `main` before starting builders.
 
 When updating LUCI builder tools:
 
@@ -268,8 +288,9 @@ When updating LUCI builder tools:
 When updating `pywin32`:
 
 - Update `.github/requirements-builder-windows-arm64.txt`.
-- Update `PYWIN32_VERSION` in `.github/workflows/builder-windows-arm64.yml`.
-- Let `verify-dependency-pins` confirm that both pins match.
+- Update `PYWIN32_VERSION` in both `.github/workflows/builder-windows-arm64.yml` and `.github/workflows/cache-windows-arm64.yml`.
+- Let `verify-dependency-pins` confirm that all pins match.
+- Populate the new wheel cache on `main` before starting builders.
 
 When updating marketplace actions:
 
@@ -297,5 +318,5 @@ These are not implemented today, but they are reasonable next steps if the threa
 - Run the `pywin32` pin synchronization check for all pull requests that touch either pin.
 - Add hash checking for the exact `pywin32` wheel if the workflow can do so without requiring repository checkout in the builder job.
 - Add branch protection rules requiring the scheduler, builder, and dependency-pin checks before merging workflow changes.
-- Move LUCI credential access into a protected GitHub environment with required reviewers.
+- Require reviewers for the `luci-builder-windows-arm64` GitHub environment.
 - Add scheduled validation that pinned external URLs still resolve to the expected hashes.
