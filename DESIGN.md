@@ -275,6 +275,14 @@ Rationale: this approximates the Go Azure builders' interactive `swarming` login
 
 Result: Swarming runs with the normal Windows profile paths for the `swarming` user, while build work still happens under `C:\b`.
 
+### Bot Reboot Policy
+
+Decision: set `SWARMING_NEVER_REBOOT=true` at Machine scope before launching the bot, alongside `SWARMING_BOT_ONE_SHOT=1`, matching Go's Windows ARM64 provisioning.
+
+Rationale: a bot-triggered reboot disconnects the GitHub-hosted runner before the one-shot process can exit normally. Machine scope ensures the setting reaches the bot started with `-UseNewEnvironment`.
+
+Result: the workflow asks the bot configuration not to reboot the hosted runner after a task failure. This is not an OS-level prohibition on reboots.
+
 ### Tool Cleanup
 
 Decision: the builder workflow removes known problematic x86-64 tools (`gdb`, `patch`, and `pkg-config`) from the runner path.
