@@ -97,7 +97,7 @@ Result: `--max-jobs` means maximum active builder workflow slots, not maximum ne
 
 ### Workflow Listing Retries
 
-Decision: retry HTTP 502, 503, and 504 responses when listing each workflow-run page, with at most three attempts and waits of 1 second and then 2 seconds. The waits honor context cancellation.
+Decision: retry HTTP 502, 503, and 504 responses per workflow-run page. Separately, if the data changes during pagination (see below), restart the affected status listing from page one. Each policy allows at most three attempts with cancellable waits of 1 second and then 2 seconds. The scheduler retains observed active run IDs across listing attempts, but requires a complete read before proceeding.
 
 Rationale: a transient GitHub API failure should not immediately lose a scheduling tick. Only read-only listing requests are retried; retrying dispatch requests could create duplicate builders.
 
@@ -209,7 +209,7 @@ Result: the longest builder phase is `Register LUCI builder`, currently limited 
 
 ### Pagination And Response Bounds
 
-Decision: each GitHub active-status query is capped at the filtered API limit of 1,000 results (10 pages of 100). A status exceeding that limit, shrinking counts, overlapping pages within one query, or a prematurely empty page fails the tick. There is no limit on completed history. Buildbucket responses are size-limited, and repeated page tokens are rejected for both queue and busy-bot queries.
+Decision: each GitHub active-status query is capped at the filtered API limit of 1,000 results (10 pages of 100). A status exceeding that limit fails immediately. Shrinking counts, overlapping pages, and an empty page before the reported total trigger a bounded reread; if the listing is still inconsistent, the tick fails without dispatch. There is no limit on completed history. Buildbucket responses are size-limited, and repeated page tokens are rejected for both queue and busy-bot queries.
 
 Rationale: API clients should have explicit bounds even when services behave unexpectedly.
 

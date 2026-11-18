@@ -352,7 +352,57 @@ func TestWorkflowRunsPaginatesGrowingActiveStatus(testingContext *testing.T) {
 	}
 }
 
-func TestActiveWorkflowRunsRejectsIncompleteHistory(testingContext *testing.T) {
+func TestActiveWorkflowRunsRechecksIncompleteStatus(t *testing.T) {
+	const empty = `{"total_count":0,"workflow_runs":[]}`
+	const stale = `{"total_count":1,"workflow_runs":[]}`
+	const partial = `{"total_count":2,"workflow_runs":[{"id":41,"status":"in_progress","display_title":"builder bot 01"}]}`
+	const complete = `{"total_count":1,"workflow_runs":[{"id":42,"status":"in_progress","display_title":"builder bot 02"}]}`
+	for _, tc := range []struct {
+		name      string
+		responses []string
+		wantPages []string
+		wantSlots []int
+		wantErr   bool
+	}{
+		{"stale count clears", []string{stale, empty, empty}, []string{"1", "1", "1"}, nil, false},
+		{"keep slots seen before restart", []string{partial, `{"total_count":2,"workflow_runs":[]}`, complete, complete}, []string{"1", "2", "1", "1"}, []int{1, 2}, false},
+		{"shrinking count", []string{partial, empty, complete, complete}, []string{"1", "2", "1", "1"}, []int{1, 2}, false},
+		{"overlapping pages", []string{partial, partial, complete, complete}, []string{"1", "2", "1", "1"}, []int{1, 2}, false},
+		{"still incomplete", []string{stale, stale, stale}, []string{"1", "1", "1"}, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var pages []string
+				transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					body := empty
+					if r.URL.Query().Get("status") == "in_progress" {
+						pages = append(pages, r.URL.Query().Get("page"))
+						if len(pages) > len(tc.responses) {
+							return nil, errors.New("unexpected additional listing")
+						}
+						body = tc.responses[len(pages)-1]
+					}
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
+				})
+				d := Dispatcher{Token: "token", Repository: "owner/repo", HTTPClient: &http.Client{Transport: transport}}
+				runs, err := d.ActiveWorkflowRuns(context.Background(), "builder.yml")
+				if (err != nil) != tc.wantErr || !slices.Equal(pages, tc.wantPages) {
+					t.Fatalf("pages = %v, error = %v; want %v, error %t", pages, err, tc.wantPages, tc.wantErr)
+				}
+				if runs.Count != len(tc.wantSlots) {
+					t.Fatalf("active runs = %+v, want slots %v", runs, tc.wantSlots)
+				}
+				for _, slot := range tc.wantSlots {
+					if runs.BotIndexes[slot] != 1 {
+						t.Errorf("slot %02d count = %d, want 1", slot, runs.BotIndexes[slot])
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestWorkflowRunsRejectsIncompleteListing(testingContext *testing.T) {
 	for _, testCase := range []struct {
 		name       string
 		firstCount int
@@ -383,9 +433,9 @@ func TestActiveWorkflowRunsRejectsIncompleteHistory(testingContext *testing.T) {
 				Repository: "owner/repo",
 				HTTPClient: server.Client(),
 			}
-			_, err := dispatcher.ActiveWorkflowRuns(context.Background(), "builder-windows-arm64.yml")
+			_, err := dispatcher.workflowRuns(context.Background(), "builder-windows-arm64.yml", "in_progress")
 			if err == nil || !strings.Contains(err.Error(), testCase.wantError) {
-				testingContext.Fatalf("ActiveWorkflowRuns() error = %v, want %q", err, testCase.wantError)
+				testingContext.Fatalf("workflowRuns() error = %v, want %q", err, testCase.wantError)
 			}
 		})
 	}

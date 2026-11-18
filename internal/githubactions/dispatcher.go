@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,8 @@ const (
 	workflowRunPageSize    = 100
 	maxWorkflowRunAttempts = 3
 )
+
+var errUnstableRunListing = errors.New("inconsistent workflow run listing")
 
 type Dispatcher struct {
 	Token      string
@@ -55,18 +58,8 @@ func (dispatcher Dispatcher) ActiveWorkflowRuns(ctx context.Context, workflow st
 	seen := make(map[int64]workflowRun)
 	for range 2 {
 		for _, status := range statuses {
-			runs, err := dispatcher.workflowRuns(ctx, strings.TrimSpace(workflow), status)
-			if err != nil {
+			if err := dispatcher.collectStatusRuns(ctx, strings.TrimSpace(workflow), status, seen); err != nil {
 				return ActiveWorkflowRuns{}, fmt.Errorf("list %s runs: %w", status, err)
-			}
-			for _, run := range runs.Runs {
-				switch run.Status {
-				case "completed":
-				case "requested", "waiting", "pending", "queued", "in_progress":
-					seen[run.ID] = run
-				default:
-					return ActiveWorkflowRuns{}, fmt.Errorf("github workflow run %d has unexpected status %q", run.ID, run.Status)
-				}
 			}
 		}
 	}
@@ -86,6 +79,29 @@ func (dispatcher Dispatcher) ActiveWorkflowRuns(ctx context.Context, workflow st
 		}
 	}
 	return activeRuns, nil
+}
+
+func (dispatcher Dispatcher) collectStatusRuns(ctx context.Context, workflow, status string, seen map[int64]workflowRun) error {
+	for attempt := 1; ; attempt++ {
+		runs, err := dispatcher.workflowRuns(ctx, workflow, status)
+		// Even an incomplete read can identify occupied slots. Keep those
+		// observations, but require a complete read before allowing dispatch.
+		for _, run := range runs.Runs {
+			switch run.Status {
+			case "completed":
+			case "requested", "waiting", "pending", "queued", "in_progress":
+				seen[run.ID] = run
+			default:
+				return fmt.Errorf("github workflow run %d has unexpected status %q", run.ID, run.Status)
+			}
+		}
+		if !errors.Is(err, errUnstableRunListing) || attempt == maxWorkflowRunAttempts {
+			return err
+		}
+		if err := waitForWorkflowRunRetry(ctx, attempt); err != nil {
+			return err
+		}
+	}
 }
 
 type workflowRunsResponse struct {
@@ -136,25 +152,30 @@ func (dispatcher Dispatcher) workflowRuns(ctx context.Context, workflow, status 
 		if pageResponse.TotalCount > maxWorkflowRunPages*workflowRunPageSize {
 			return workflowRunsResponse{}, fmt.Errorf("github workflow runs query exceeds %d %s runs", maxWorkflowRunPages*workflowRunPageSize, status)
 		}
-		if pageResponse.TotalCount < allRuns.TotalCount {
-			return workflowRunsResponse{}, fmt.Errorf("github workflow run count decreased during pagination")
-		}
-		allRuns.TotalCount = pageResponse.TotalCount
-		if len(pageResponse.Runs) == 0 && len(allRuns.Runs) < allRuns.TotalCount {
-			return workflowRunsResponse{}, fmt.Errorf("github workflow runs query ended before all runs were listed")
-		}
+		var repeatedID int64
 		for _, run := range pageResponse.Runs {
 			if run.ID <= 0 {
 				return workflowRunsResponse{}, fmt.Errorf("github workflow runs query returned invalid run ID %d", run.ID)
 			}
 			if seen[run.ID] {
-				return workflowRunsResponse{}, fmt.Errorf("github workflow run %d repeated during %s pagination", run.ID, status)
+				repeatedID = run.ID
 			}
 			seen[run.ID] = true
 		}
 		allRuns.Runs = append(allRuns.Runs, pageResponse.Runs...)
+		prevTotal := allRuns.TotalCount
+		allRuns.TotalCount = pageResponse.TotalCount
+		if allRuns.TotalCount < prevTotal {
+			return allRuns, fmt.Errorf("%w: count decreased from %d to %d on page %d", errUnstableRunListing, prevTotal, allRuns.TotalCount, page)
+		}
+		if repeatedID != 0 {
+			return allRuns, fmt.Errorf("%w: run %d repeated on page %d", errUnstableRunListing, repeatedID, page)
+		}
 		if len(allRuns.Runs) >= allRuns.TotalCount {
 			return allRuns, nil
+		}
+		if len(pageResponse.Runs) == 0 {
+			return allRuns, fmt.Errorf("%w: ended before all runs were listed (page %d, listed %d, total_count %d)", errUnstableRunListing, page, len(allRuns.Runs), allRuns.TotalCount)
 		}
 	}
 	return workflowRunsResponse{}, fmt.Errorf("github workflow runs query exceeded %d pages", maxWorkflowRunPages)
@@ -188,12 +209,8 @@ func (dispatcher Dispatcher) workflowRunsPage(ctx context.Context, requestURL st
 		_, _ = io.Copy(io.Discard, io.LimitReader(httpResponse.Body, 4096))
 		httpResponse.Body.Close()
 
-		timer := time.NewTimer(time.Second << (attempt - 1))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return workflowRunsResponse{}, fmt.Errorf("wait to retry workflow runs request: %w", ctx.Err())
-		case <-timer.C:
+		if err := waitForWorkflowRunRetry(ctx, attempt); err != nil {
+			return workflowRunsResponse{}, err
 		}
 	}
 	defer httpResponse.Body.Close()
@@ -212,6 +229,15 @@ func (dispatcher Dispatcher) workflowRunsPage(ctx context.Context, requestURL st
 		return workflowRunsResponse{}, fmt.Errorf("decode workflow runs response: %w", err)
 	}
 	return payload, nil
+}
+
+func waitForWorkflowRunRetry(ctx context.Context, attempt int) error {
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("wait to retry workflow runs request: %w", ctx.Err())
+	case <-time.After(time.Second << (attempt - 1)):
+		return nil
+	}
 }
 
 func parseWorkflowRunBotIndex(displayTitle string) (botIndex int, ok bool) {
