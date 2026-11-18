@@ -14,9 +14,10 @@ import (
 )
 
 const (
-	DefaultAPIURL       = "https://api.github.com"
-	maxWorkflowRunPages = 100
-	workflowRunPageSize = 100
+	DefaultAPIURL          = "https://api.github.com"
+	maxWorkflowRunPages    = 100
+	workflowRunPageSize    = 100
+	maxWorkflowRunAttempts = 3
 )
 
 type Dispatcher struct {
@@ -152,9 +153,29 @@ func (dispatcher Dispatcher) workflowRunsPage(ctx context.Context, requestURL st
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
 
-	httpResponse, err := httpClient.Do(httpRequest)
-	if err != nil {
-		return workflowRunsResponse{}, fmt.Errorf("send workflow runs request: %w", err)
+	var httpResponse *http.Response
+	for attempt := 1; ; attempt++ {
+		httpResponse, err = httpClient.Do(httpRequest)
+		if err != nil {
+			return workflowRunsResponse{}, fmt.Errorf("send workflow runs request: %w", err)
+		}
+		retryable := httpResponse.StatusCode == http.StatusBadGateway ||
+			httpResponse.StatusCode == http.StatusServiceUnavailable ||
+			httpResponse.StatusCode == http.StatusGatewayTimeout
+		if !retryable || attempt == maxWorkflowRunAttempts {
+			break
+		}
+
+		_, _ = io.Copy(io.Discard, io.LimitReader(httpResponse.Body, 4096))
+		httpResponse.Body.Close()
+
+		timer := time.NewTimer(time.Second << (attempt - 1))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return workflowRunsResponse{}, fmt.Errorf("wait to retry workflow runs request: %w", ctx.Err())
+		case <-timer.C:
+		}
 	}
 	defer httpResponse.Body.Close()
 

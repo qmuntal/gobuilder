@@ -95,6 +95,14 @@ Rationale: queued or waiting GitHub Actions runs already represent requested cap
 
 Result: `--max-jobs` means maximum active builder workflow slots, not maximum newly dispatched jobs per scheduler tick.
 
+### Workflow Listing Retries
+
+Decision: retry HTTP 502, 503, and 504 responses when listing each workflow-run page, with at most three attempts and waits of 1 second and then 2 seconds. The waits honor context cancellation.
+
+Rationale: a transient GitHub API failure should not immediately lose a scheduling tick. Only read-only listing requests are retried; retrying dispatch requests could create duplicate builders.
+
+Result: other errors still fail immediately. After retry exhaustion, the scheduler reports the final API error and dispatches no builders rather than using incomplete active-run data.
+
 ### Slot Allocation
 
 Decision: scheduler-dispatched builders use two-digit slots from `01` through `--max-jobs`.

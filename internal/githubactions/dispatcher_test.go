@@ -3,12 +3,17 @@ package githubactions
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
+	"time"
 )
 
 func TestDispatchWorkflowSendsExpectedRequest(testingContext *testing.T) {
@@ -490,4 +495,162 @@ func TestDispatchWorkflowAcceptsSuccessfulResponseWithBody(testingContext *testi
 	if err != nil {
 		testingContext.Fatalf("DispatchWorkflow() error = %v", err)
 	}
+}
+
+func TestWorkflowRunsPageBackoff(testingContext *testing.T) {
+	for _, testCase := range []struct {
+		name         string
+		statuses     []int
+		requestTimes []time.Duration
+		wantError    string
+	}{
+		{
+			name:         "recover from bad gateway and service unavailable",
+			statuses:     []int{502, 503, 200},
+			requestTimes: []time.Duration{0, time.Second, 3 * time.Second},
+		},
+		{
+			name:         "recover from gateway timeout",
+			statuses:     []int{504, 200},
+			requestTimes: []time.Duration{0, time.Second},
+		},
+		{
+			name:         "retry limit",
+			statuses:     []int{502, 503, 504, 200},
+			requestTimes: []time.Duration{0, time.Second, 3 * time.Second},
+			wantError:    "status 504: Gateway Timeout",
+		},
+		{
+			name:         "forbidden",
+			statuses:     []int{403, 200},
+			requestTimes: []time.Duration{0},
+			wantError:    "status 403: Forbidden",
+		},
+		{
+			name:         "rate limited",
+			statuses:     []int{429, 200},
+			requestTimes: []time.Duration{0},
+			wantError:    "status 429: Too Many Requests",
+		},
+		{
+			name:         "other server error",
+			statuses:     []int{500, 200},
+			requestTimes: []time.Duration{0},
+			wantError:    "status 500: Internal Server Error",
+		},
+	} {
+		testingContext.Run(testCase.name, func(testingContext *testing.T) {
+			synctest.Test(testingContext, func(testingContext *testing.T) {
+				const requestURL = "https://example.test/repos/owner/repo/actions/workflows/builder.yml/runs?page=2&per_page=100"
+				start := time.Now()
+				var requestTimes []time.Duration
+				dispatcher := Dispatcher{
+					Token: "token",
+					HTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+						if request.Method != http.MethodGet || request.URL.String() != requestURL {
+							testingContext.Errorf("request = %s %s, want GET %s", request.Method, request.URL, requestURL)
+						}
+						if request.Header.Get("Authorization") != "Bearer token" {
+							testingContext.Errorf("Authorization header = %q", request.Header.Get("Authorization"))
+						}
+						requestTimes = append(requestTimes, time.Since(start))
+						if len(requestTimes) > len(testCase.statuses) {
+							return nil, errors.New("unexpected additional request")
+						}
+						status := testCase.statuses[len(requestTimes)-1]
+						body := http.StatusText(status)
+						if status == http.StatusOK {
+							body = `{"total_count":1,"workflow_runs":[{"id":42,"status":"in_progress","display_title":"builder bot 01"}]}`
+						}
+						return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}, nil
+					})},
+				}
+
+				runs, err := dispatcher.workflowRunsPage(context.Background(), requestURL)
+				if testCase.wantError != "" {
+					if err == nil || !strings.Contains(err.Error(), testCase.wantError) {
+						testingContext.Errorf("workflowRunsPage() error = %v, want %q", err, testCase.wantError)
+					}
+					if runs.TotalCount != 0 || len(runs.Runs) != 0 {
+						testingContext.Errorf("workflowRunsPage() = %+v, want no runs on failure", runs)
+					}
+				} else if err != nil {
+					testingContext.Errorf("workflowRunsPage() error = %v", err)
+				} else if runs.TotalCount != 1 || len(runs.Runs) != 1 || runs.Runs[0].ID != 42 {
+					testingContext.Errorf("workflowRunsPage() = %+v, want run 42", runs)
+				}
+				if !slices.Equal(requestTimes, testCase.requestTimes) {
+					testingContext.Errorf("request times = %v, want %v", requestTimes, testCase.requestTimes)
+				}
+			})
+		})
+	}
+}
+
+func TestWorkflowRunsPageCancelsBackoff(testingContext *testing.T) {
+	synctest.Test(testingContext, func(testingContext *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		timer := time.AfterFunc(500*time.Millisecond, cancel)
+		defer timer.Stop()
+
+		requestCount := 0
+		dispatcher := Dispatcher{
+			HTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				requestCount++
+				return &http.Response{
+					StatusCode: http.StatusBadGateway,
+					Body:       io.NopCloser(strings.NewReader("Server Error")),
+				}, nil
+			})},
+		}
+		start := time.Now()
+		_, err := dispatcher.workflowRunsPage(ctx, "https://example.test/runs")
+		if !errors.Is(err, context.Canceled) {
+			testingContext.Errorf("workflowRunsPage() error = %v, want context cancellation", err)
+		}
+		if requestCount != 1 {
+			testingContext.Errorf("request count = %d, want 1", requestCount)
+		}
+		if elapsed := time.Since(start); elapsed != 500*time.Millisecond {
+			testingContext.Errorf("elapsed = %v, want cancellation after 500ms", elapsed)
+		}
+	})
+}
+
+func TestDispatchWorkflowDoesNotRetry(testingContext *testing.T) {
+	for _, status := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		testingContext.Run(strconv.Itoa(status), func(testingContext *testing.T) {
+			synctest.Test(testingContext, func(testingContext *testing.T) {
+				requestCount := 0
+				dispatcher := Dispatcher{
+					Token:      "token",
+					APIURL:     "https://example.test",
+					Repository: "owner/repo",
+					Ref:        "main",
+					HTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+						requestCount++
+						return &http.Response{
+							StatusCode: status,
+							Body:       io.NopCloser(strings.NewReader("Server Error")),
+						}, nil
+					})},
+				}
+				start := time.Now()
+				err := dispatcher.DispatchWorkflow(context.Background(), DispatchRequest{Workflow: "builder.yml"})
+				if err == nil {
+					testingContext.Error("DispatchWorkflow() error = nil, want error")
+				}
+				if requestCount != 1 || time.Since(start) != 0 {
+					testingContext.Errorf("request count = %d, elapsed = %v, want one request without backoff", requestCount, time.Since(start))
+				}
+			})
+		})
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (roundTrip roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTrip(request)
 }

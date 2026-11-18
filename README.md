@@ -27,6 +27,8 @@ Before dispatching, the scheduler counts active `builder-windows-arm64` workflow
 
 The scheduler reads one unfiltered, paginated workflow-run listing and counts active statuses locally, deduplicating by GitHub run ID across pages. Slots are read from the ` bot NN` suffix of the run name, independently of whether `--workflow` is a filename or a numeric ID. History scans are limited to 100 pages of 100 runs; if the full history cannot be read within that bound, scheduling fails without dispatching builders.
 
+Each workflow-listing page retries HTTP 502, 503, and 504 responses at most twice, waiting 1 second and then 2 seconds. Cancellation interrupts these waits. Other errors and workflow-dispatch requests are not retried; a failed listing still prevents all dispatches.
+
 Manual `builder-windows-arm64` workflow dispatches default to slot `99`; scheduler-dispatched runs use the first free slot in the configured active range. Slot inputs must be exactly two ASCII digits from `01` to `99`, with no surrounding whitespace.
 
 Design details are documented in [DESIGN.md](DESIGN.md). Security hardening details are documented in [DESIGN-SECURITY.MD](DESIGN-SECURITY.MD).
