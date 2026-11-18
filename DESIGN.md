@@ -293,9 +293,9 @@ Result: the workflow asks the bot configuration not to reboot the hosted runner 
 
 ### Tool Cleanup
 
-Decision: the builder workflow removes `gdb.exe`, `patch.exe`, and `pkg-config.exe` only from known Strawberry Perl and Git for Windows directories and only when their PE machine type is AMD64. ARM64 tools and copies from other providers are left alone.
+Decision: the builder uses `Get-Command -All` to remove every `gdb`, `patch`, and `pkg-config` application it finds on the runner's `PATH`. Looking up bare names catches script wrappers as well as `.exe` files. There is no directory or architecture filter, so a native ARM64 copy on `PATH` is removed too.
 
-Rationale: these preinstalled tools can crash or misbehave under ARM64 emulation and cause unrelated Go tests to fail.
+Rationale: the standalone MinGW debugger cannot read the ARM64 executable built by the runtime tests. Strawberry's Perl implementation of `pkg-config` reports missing packages in a different format than the `cmd/go` script test expects.
 
 Result: dependent Go tests skip or avoid the broken tools instead of failing because the wrong architecture binary was found.
 

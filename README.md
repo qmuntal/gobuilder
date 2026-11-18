@@ -52,7 +52,7 @@ The `builder-windows-arm64` workflow follows the Go dashboard builder setup by m
 
 The `builder-windows-arm64` workflow runs on a Windows ARM64 runner. It downloads `luci_machine_tokend.exe` and `bootstrapswarm.exe` from `go-builder-data`, matching the Azure Windows ARM64 setup in `golang/build`. The Swarming bot handles CIPD-managed payloads after it starts.
 
-The runner must provide `python3.exe` on `PATH`; `python.exe` alone is not sufficient. Before minting a token, the builder uses the same clean `swarming` login and working directory as the bot to check that Python imports `win32security`, GCC targets ARM64, and `C:\b` is writable. Known incompatible AMD64 tools from Strawberry Perl and Git for Windows are removed; native ARM64 copies are preserved.
+The runner must provide `python3.exe` on `PATH`; `python.exe` alone is not sufficient. Before minting a token, the builder uses the same clean `swarming` login and working directory as the bot to check that Python imports `win32security`, GCC targets ARM64, and `C:\b` is writable. The builder removes all copies of `gdb`, `patch`, and `pkg-config` it finds on the runner's `PATH`, including script wrappers.
 
 The workflow grants the local `swarming` user `SeCreateSymbolicLinkPrivilege` for symbolic links instead of adding it to Administrators.
 
