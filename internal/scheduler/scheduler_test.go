@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -15,11 +16,21 @@ import (
 )
 
 type fakeJobQueue struct {
-	jobs int
+	jobs    int
+	bots    map[string]time.Time
+	busyErr error
+	onBusy  func()
 }
 
 func (queue fakeJobQueue) JobsInQueue(_ context.Context) (int, error) {
 	return queue.jobs, nil
+}
+
+func (queue fakeJobQueue) BusyBots(_ context.Context) (map[string]time.Time, error) {
+	if queue.onBusy != nil {
+		queue.onBusy()
+	}
+	return queue.bots, queue.busyErr
 }
 
 type recordingDispatcher struct {
@@ -29,10 +40,11 @@ type recordingDispatcher struct {
 
 type fakeRunCounter struct {
 	activeRuns githubactions.ActiveWorkflowRuns
+	err        error
 }
 
 func (counter fakeRunCounter) ActiveWorkflowRuns(_ context.Context, _ string) (githubactions.ActiveWorkflowRuns, error) {
-	return counter.activeRuns, nil
+	return counter.activeRuns, counter.err
 }
 
 func (dispatcher *recordingDispatcher) DispatchWorkflow(_ context.Context, dispatchRequest githubactions.DispatchRequest) error {
@@ -243,6 +255,72 @@ func TestRunDoesNotDispatchWithUnknownActiveRunSlot(testingContext *testing.T) {
 	}
 }
 
+func TestRunSkipsCapacityLookupForEmptyQueue(testingContext *testing.T) {
+	_, err := Run(context.Background(), Config{
+		Queue: fakeJobQueue{}, MaxJobs: 5,
+		RunCounter: fakeRunCounter{err: errors.New("unexpected GitHub lookup")},
+	})
+	if err != nil {
+		testingContext.Fatal(err)
+	}
+}
+
+func TestRunAccountsForIncomingBots(testingContext *testing.T) {
+	start := time.Unix(1000, 0)
+	inProgress := map[int]time.Time{1: start}
+	for _, tc := range []struct {
+		name       string
+		inProgress map[int]time.Time
+		bots       map[string]time.Time
+		busyErr    error
+		wantErr    bool
+		wantSlot   string
+	}{
+		{name: "awaiting approval", busyErr: errors.New("unexpected busy lookup")},
+		{name: "bootstrapping", inProgress: inProgress},
+		{name: "serving a task", inProgress: inProgress, bots: map[string]time.Time{"fleet--01": start.Add(time.Minute)}, wantSlot: "02"},
+		{name: "previous use of same slot", inProgress: inProgress, bots: map[string]time.Time{"fleet--01": start.Add(-time.Hour)}},
+		{name: "different fleet", inProgress: inProgress, bots: map[string]time.Time{"other--01": start.Add(time.Minute)}},
+		{name: "busy lookup failed", inProgress: inProgress, busyErr: errors.New("unavailable"), wantErr: true},
+	} {
+		testingContext.Run(tc.name, func(t *testing.T) {
+			dispatcher := &recordingDispatcher{}
+			_, err := Run(context.Background(), Config{
+				Queue: fakeJobQueue{jobs: 1, bots: tc.bots, busyErr: tc.busyErr},
+				RunCounter: fakeRunCounter{activeRuns: githubactions.ActiveWorkflowRuns{
+					Count: 1, BotIndexes: map[int]int{1: 1}, InProgressSince: tc.inProgress,
+				}},
+				Dispatcher: dispatcher, MaxJobs: 5, BotHostnamePrefix: "fleet",
+			})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Run() error = %v, want error %t", err, tc.wantErr)
+			}
+			requests := dispatcher.recordedRequests()
+			if tc.wantSlot == "" && len(requests) == 0 {
+				return
+			}
+			if len(requests) != 1 || requests[0].Inputs[botIndexInput] != tc.wantSlot {
+				t.Fatalf("requests = %v, want slot %q", requests, tc.wantSlot)
+			}
+		})
+	}
+}
+
+func TestRunDoesNotReplaceNewlyClaimedJob(t *testing.T) {
+	start := time.Unix(1000, 0)
+	queue := &fakeJobQueue{jobs: 1, bots: map[string]time.Time{"fleet--01": start.Add(time.Minute)}}
+	queue.onBusy = func() { queue.jobs = 0 }
+	result, err := Run(context.Background(), Config{
+		Queue: queue, MaxJobs: 5, BotHostnamePrefix: "fleet",
+		RunCounter: fakeRunCounter{activeRuns: githubactions.ActiveWorkflowRuns{
+			Count: 1, BotIndexes: map[int]int{1: 1}, InProgressSince: map[int]time.Time{1: start},
+		}},
+	})
+	if err != nil || result.QueueDepth != 0 || result.Dispatched != 0 {
+		t.Fatalf("Run() = %+v, %v; want no dispatch after the only job was claimed", result, err)
+	}
+}
+
 func TestRunAccountsForGitHubWorkflowRuns(testingContext *testing.T) {
 	for _, testCase := range []struct {
 		name            string
@@ -250,9 +328,20 @@ func TestRunAccountsForGitHubWorkflowRuns(testingContext *testing.T) {
 		displayTitle    string
 		status          string
 		transitionQuery string
+		nextStatus      string
+		deepHistory     bool
 		maxJobs         int
 		wantBotIndex    string
 	}{
+		{
+			name:         "old approval behind 10001 completed runs",
+			workflow:     "builder-windows-arm64.yml",
+			displayTitle: "builder-windows-arm64 bot 01",
+			status:       "waiting",
+			deepHistory:  true,
+			maxJobs:      2,
+			wantBotIndex: "02",
+		},
 		{
 			name:         "workflow ID with occupied capacity",
 			workflow:     "12345",
@@ -293,6 +382,15 @@ func TestRunAccountsForGitHubWorkflowRuns(testingContext *testing.T) {
 			maxJobs:         1,
 		},
 		{
+			name:            "run enters a previously queried state",
+			workflow:        "builder-windows-arm64.yml",
+			displayTitle:    "builder-windows-arm64 bot 01",
+			status:          "queued",
+			transitionQuery: "pending",
+			nextStatus:      "waiting",
+			maxJobs:         1,
+		},
+		{
 			name:         "completed run does not occupy a slot",
 			workflow:     "builder-windows-arm64.yml",
 			displayTitle: "builder-windows-arm64 bot 01",
@@ -306,9 +404,22 @@ func TestRunAccountsForGitHubWorkflowRuns(testingContext *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
 				statusAtSnapshot := testCase.status
 				if transitioned.Load() {
-					statusAtSnapshot = "in_progress"
+					statusAtSnapshot = testCase.nextStatus
+					if statusAtSnapshot == "" {
+						statusAtSnapshot = "in_progress"
+					}
 				}
 				queriedStatus := request.URL.Query().Get("status")
+				if testCase.deepHistory {
+					if queriedStatus == "" {
+						_, _ = responseWriter.Write([]byte(`{"total_count":10002,"workflow_runs":[{"id":10002,"status":"completed"}]}`))
+						return
+					}
+					if request.URL.Query().Has("created") {
+						_, _ = responseWriter.Write([]byte(`{"total_count":0,"workflow_runs":[]}`))
+						return
+					}
+				}
 				if testCase.transitionQuery != "" && (queriedStatus == "" || queriedStatus == testCase.transitionQuery) {
 					transitioned.Store(true)
 				}

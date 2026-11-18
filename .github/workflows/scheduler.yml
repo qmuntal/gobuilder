@@ -20,6 +20,10 @@ on:
         type: string
         required: false
         default: windows-arm64
+      bot_hostname_prefix:
+        description: LUCI bot hostname before --NN (empty uses the Windows ARM64 fleet)
+        type: string
+        required: false
 
 permissions:
   actions: write
@@ -35,7 +39,8 @@ jobs:
     env:
       BUILDER_WORKFLOW: ${{ inputs.workflow || 'builder-windows-arm64.yml' }}
       BUILDER_NAME: ${{ inputs.builder_name || 'windows-arm64' }}
-      MAX_JOBS: ${{ inputs.max_jobs || 5 }}
+      BOT_HOSTNAME_PREFIX: ${{ inputs.bot_hostname_prefix }}
+      MAX_JOBS: ${{ inputs.max_jobs }}
     steps:
       - name: Check out scheduler
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -65,4 +70,5 @@ jobs:
           --ref "${{ github.ref_name }}"
           --workflow "$BUILDER_WORKFLOW"
           --buildbucket-builder-name "$BUILDER_NAME"
+          --bot-hostname-prefix "$BOT_HOSTNAME_PREFIX"
           --max-jobs "${{ env.MAX_JOBS }}"

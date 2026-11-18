@@ -9,7 +9,7 @@ The system provides temporary Windows ARM64 LUCI Swarming capacity for the Go pr
 - `scheduler` workflow: runs every 5 minutes and can also be started manually. It builds and runs `cmd/scheduler` on Ubuntu.
 - `builder-windows-arm64` workflow: starts a Windows ARM64 runner and registers it as a LUCI Swarming bot.
 - `cache-windows-arm64` workflow: populates compiler and Python-wheel caches without the LUCI environment.
-- `verify-dependency-pins` workflow: checks dependency pins and cache paths in both Windows ARM64 workflows on Dependabot pull requests.
+- `verify-dependency-pins` workflow: checks dependency pins, cache paths, and exact reader/writer key expressions on every relevant pull request.
 - `cmd/scheduler`: command-line entry point for querying Buildbucket and dispatching builder workflows.
 - `internal/buildbucket`: Buildbucket queue client.
 - `internal/githubactions`: GitHub Actions dispatch and active-run client.
@@ -20,9 +20,9 @@ The system provides temporary Windows ARM64 LUCI Swarming capacity for the Go pr
 1. GitHub starts the `scheduler` workflow on the 5-minute cron or by manual dispatch.
 2. The workflow checks out the repository, sets up Go, builds `cmd/scheduler`, and runs it.
 3. The scheduler queries Buildbucket for `SCHEDULED` Go LUCI builds.
-4. The scheduler queries GitHub Actions for active runs of the target builder workflow.
-5. The scheduler computes free builder slots and dispatches one builder workflow run per selected slot.
-6. Each builder workflow run validates its `bot_index`, derives its LUCI hostname, restores the pre-populated dependency caches, prepares the Windows runner, mints a LUCI machine token, and starts `bootstrapswarm.exe`.
+4. If work is queued and capacity is enabled, the scheduler queries GitHub Actions for active runs of the target builder workflow.
+5. The scheduler accounts for incoming bots, consulting `STARTED` Buildbucket builds when needed, and dispatches one builder workflow run per selected free slot.
+6. Each builder validates its slot, restores the dependency caches, prepares the runner and checks prerequisites as `swarming` before minting the machine token and starting `bootstrapswarm.exe`.
 
 ## Workflow Design
 
@@ -89,9 +89,9 @@ The GitHub client counts runs in these statuses:
 - `waiting`
 - `pending`
 
-The client reads one unfiltered, paginated listing from the workflow-specific endpoint and classifies each run by its returned status. Completed runs are ignored; all active runs count regardless of their display title. Missing or unrecognized statuses cause an error rather than risking an undercount. Runs are deduplicated by GitHub run ID across pages. Missing or nonpositive run IDs cause an error rather than risking incorrect deduplication.
+The client queries the workflow-specific endpoint once per active status, with `in_progress` last. It repeats the sweep and reserves the union by run ID, including manual runs and reruns. This catches moves into already-read states without scanning completed history or imposing an age cutoff on approvals. A run seen active and then completed may reserve its slot for this tick. Invalid IDs and unexpected returned statuses are errors.
 
-Rationale: queued or waiting GitHub Actions runs already represent requested capacity. Counting only running jobs would over-dispatch while GitHub is still placing jobs. Reading one listing avoids losing a run that changes between active statuses while separate status-filtered queries are being made.
+Rationale: active runs all occupy capacity, but a one-shot bot already executing a task cannot serve another queued build. Where it affects the decision, the scheduler reads `STARTED` builds in the project/bucket without the queue's builder-name filter. Only an actual `infra.swarming.botDimensions` `id` matching `<bot_hostname_prefix>--NN` with a build start at or after the current in-progress attempt's start proves the slot is busy. Otherwise it counts as incoming. On a match, the scheduler refreshes queue depth to avoid dispatching for a build just claimed between reads.
 
 Result: `--max-jobs` means maximum active builder workflow slots, not maximum newly dispatched jobs per scheduler tick.
 
@@ -118,7 +118,7 @@ Allocation rules:
 - No queued LUCI work means no dispatch.
 - No available active-run capacity means no dispatch.
 - Unknown active builder slots mean no dispatch.
-- Dispatch count is `min(queue depth, max jobs - active builder runs)`.
+- Dispatch count is `min(max(0, queue depth - incoming builders), max(0, max jobs - active builder runs))`.
 - Each dispatched workflow receives `bot_index` formatted as two digits.
 
 ### Unknown Active Builder Slots
@@ -209,7 +209,7 @@ Result: the longest builder phase is `Register LUCI builder`, currently limited 
 
 ### Pagination And Response Bounds
 
-Decision: GitHub workflow-run history scans are capped at 100 pages of 100 runs. Histories exceeding that limit, shrinking run counts, and prematurely empty pages fail the scheduler run rather than returning an incomplete active-run count. Growing histories are paginated using the latest reported count. Buildbucket response bodies are size-limited, and all previously seen page tokens are tracked so both immediate repeats and longer pagination cycles fail the scheduler run.
+Decision: each GitHub active-status query is capped at the filtered API limit of 1,000 results (10 pages of 100). A status exceeding that limit, shrinking counts, overlapping pages within one query, or a prematurely empty page fails the tick. There is no limit on completed history. Buildbucket responses are size-limited, and repeated page tokens are rejected for both queue and busy-bot queries.
 
 Rationale: API clients should have explicit bounds even when services behave unexpectedly.
 
@@ -263,7 +263,7 @@ Decision: `pywin32` is pinned by `PYWIN32_VERSION` in both Windows ARM64 workflo
 
 Rationale: `bootstrapswarm.exe` needs Python Windows integration, but the builder workflow should not check out the repository just to read a dependency file. The requirements file exists as update metadata.
 
-Result: Dependabot can discover `pywin32` updates, and `verify-dependency-pins` requires Dependabot pull requests to keep both workflow pins synchronized. The builder does not contact PyPI or save the pip cache.
+Result: Dependabot can discover `pywin32` updates, and `verify-dependency-pins` requires all relevant pull requests to keep both workflow pins synchronized. The builder does not contact PyPI or save the pip cache.
 
 ### Dependency Update Flow
 
@@ -271,7 +271,7 @@ Decision: runtime dependency pins live in the workflow environment; Dependabot-v
 
 Rationale: the builder workflow is intentionally self-contained. Update automation should not force the credentialed builder job to depend on checked-out repository files.
 
-Result: updates to mirrored dependencies require metadata and both runtime workflow pin changes. The existing Dependabot check verifies the shared compiler version/hash, Python dependency version, and cache paths. New cache keys must be populated before the corresponding builders can start.
+Result: updates to mirrored dependencies require metadata and both runtime workflow pin changes. A read-only PR check compares the shared pins and the actual `with.path` and `with.key` values of the writer and restore steps. New cache keys must be populated before the corresponding builders can start.
 
 ## Runner Preparation
 
@@ -281,7 +281,7 @@ Decision: the builder workflow creates or updates a local `swarming` user, grant
 
 Rationale: this approximates the Go Azure builders' interactive `swarming` login model without rebooting the GitHub-hosted runner. The symbolic-link privilege supports builds without granting administrator membership. `-UseNewEnvironment` avoids inheriting the GitHub runner account's profile variables, while `-LoadUserProfile` initializes the target user's Windows profile state.
 
-Result: Swarming runs with the normal Windows profile paths for the `swarming` user, while build work still happens under `C:\b`.
+Result: the same launcher runs a preflight as `swarming` before token minting and starts the bot after minting. The preflight resolves `python3.exe` inside the clean child environment, imports `win32security`, checks the GCC target, and writes a temporary file in the actual workdir.
 
 ### Bot Reboot Policy
 
@@ -293,7 +293,7 @@ Result: the workflow asks the bot configuration not to reboot the hosted runner 
 
 ### Tool Cleanup
 
-Decision: the builder workflow removes known problematic x86-64 tools (`gdb`, `patch`, and `pkg-config`) from the runner path.
+Decision: the builder workflow removes `gdb.exe`, `patch.exe`, and `pkg-config.exe` only from known Strawberry Perl and Git for Windows directories and only when their PE machine type is AMD64. ARM64 tools and copies from other providers are left alone.
 
 Rationale: these preinstalled tools can crash or misbehave under ARM64 emulation and cause unrelated Go tests to fail.
 
@@ -339,7 +339,7 @@ Limitation: scheduler slot allocation depends on active GitHub Actions workflow 
 
 Reason: GitHub Actions is the only local source of already-requested builder capacity.
 
-Effect: delayed or malformed run metadata can temporarily reduce dispatch accuracy. If a target active run has an unparseable slot, the scheduler dispatches no new builders until that run is gone.
+Effect: the GitHub and LUCI reads are not an atomic snapshot. A new run or rerun can still start after a lookup; per-slot Actions concurrency remains the final guard. Delayed or missing busy-bot metadata can temporarily under-provision. If an observed active run has an unparseable slot, the scheduler dispatches no new builders until that run is gone.
 
 ### Scheduled Wakeups Are Best Effort
 

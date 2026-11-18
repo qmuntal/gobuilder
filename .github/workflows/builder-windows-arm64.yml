@@ -112,22 +112,26 @@ jobs:
           Write-Host "CC: $(gcc --version 2>&1 | Select-Object -First 1)"
           Write-Host "Target: $(gcc -dumpmachine)"
 
-      - name: Remove broken x86-64 tools
+      - name: Remove known broken x86-64 tools
         timeout-minutes: 5
         run: |
-          # Several tools pre-installed on the runner (from Strawberry Perl,
-          # Git-for-Windows, etc.) are x86-64 binaries that crash or
-          # misbehave under ARM64 emulation. Remove them so the Go test
-          # suite skips the dependent tests instead of failing.
+          $knownDirs = @(
+            "C:\Strawberry\c\bin", "C:\Strawberry\perl\bin",
+            "$env:ProgramFiles\Git\usr\bin", "$env:ProgramFiles\Git\mingw64\bin"
+          )
           foreach ($tool in @("gdb", "patch", "pkg-config")) {
-            $commands = @(Get-Command $tool -CommandType Application -All -ErrorAction SilentlyContinue)
-            if ($commands.Count -gt 0) {
-              foreach ($cmd in $commands) {
-                Write-Host "Removing $tool at $($cmd.Source)"
-                Remove-Item $cmd.Source -Force
+            foreach ($cmd in Get-Command "$tool.exe" -CommandType Application -All -ErrorAction SilentlyContinue) {
+              if ((Split-Path -Parent $cmd.Source) -notin $knownDirs) { continue }
+              $pe = [System.Reflection.PortableExecutable.PEReader]::new([IO.File]::OpenRead($cmd.Source))
+              try {
+                $machine = $pe.PEHeaders.CoffHeader.Machine
+              } finally {
+                $pe.Dispose()
               }
-            } else {
-              Write-Host "$tool not found, nothing to remove"
+              if ($machine -eq [System.Reflection.PortableExecutable.Machine]::Amd64) {
+                Write-Host "Removing known x86-64 tool: $($cmd.Source)"
+                Remove-Item -LiteralPath $cmd.Source -Force
+              }
             }
           }
 
@@ -204,6 +208,21 @@ jobs:
 
           Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_PASSWORD=$swarmingPassword"
 
+          # Use the same login, clean Machine environment and workdir for
+          # preflight and Swarming; neither should inherit runneradmin's PATH.
+          $launcher = Join-Path $env:RUNNER_TEMP "Start-SwarmingProcess.ps1"
+          @'
+          param([string] $FilePath, [string[]] $ProcessArgs)
+          $ErrorActionPreference = "Stop"
+          $password = ConvertTo-SecureString $env:SWARMING_PASSWORD -AsPlainText -Force
+          $credential = [pscredential]::new(".\$env:SWARMING_USER", $password)
+          $process = Start-Process -FilePath $FilePath -ArgumentList $ProcessArgs `
+            -Credential $credential -LoadUserProfile -UseNewEnvironment `
+            -WorkingDirectory $env:SWARMING_WORKDIR -Wait -PassThru
+          exit $process.ExitCode
+          '@ | Set-Content -LiteralPath $launcher -Encoding ASCII
+          Add-Content -Path $env:GITHUB_ENV -Value "SWARMING_LAUNCHER=$launcher"
+
       - name: Install LUCI builder tools
         timeout-minutes: 5
         run: |
@@ -221,6 +240,26 @@ jobs:
             -OutFile (Join-Path $env:LUCI_TOOL_ROOT "bootstrapswarm.exe") `
             -Sha256 $env:BOOTSTRAPSWARM_SHA256
           icacls $env:LUCI_TOOL_ROOT /grant "${env:SWARMING_USER}:(OI)(CI)RX"
+
+      - name: Check prerequisites as the swarming user
+        timeout-minutes: 2
+        run: |
+          $probe = Join-Path $env:LUCI_TOOL_ROOT "preflight.py"
+          @'
+          import subprocess
+          import tempfile
+          import win32security
+
+          target = subprocess.check_output(["gcc.exe", "-dumpmachine"], text=True).strip()
+          if target.split("-")[0].lower() not in ("aarch64", "arm64"):
+              raise SystemExit(f"Expected an ARM64 compiler, got {target!r}")
+          with tempfile.TemporaryFile(dir=".") as f:
+              f.write(b"preflight")
+          '@ | Set-Content -LiteralPath $probe -Encoding ASCII
+          # Resolve python3.exe inside the clean child PATH, just as bootstrapswarm does.
+          & $env:SWARMING_LAUNCHER -FilePath "$env:SystemRoot\System32\cmd.exe" `
+            -ProcessArgs @("/d", "/c", "python3.exe `"$probe`"")
+          if ($LASTEXITCODE -ne 0) { throw "Swarming preflight failed (exit $LASTEXITCODE): check python3, win32security, ARM64 gcc and workdir access" }
 
       - name: Mint LUCI machine token
         timeout-minutes: 5
@@ -268,22 +307,10 @@ jobs:
         # this timeout would not extend the usable bot lifetime.
         timeout-minutes: 60
         run: |
-          $securePassword = ConvertTo-SecureString $env:SWARMING_PASSWORD -AsPlainText -Force
-          $credential = [System.Management.Automation.PSCredential]::new(".\$env:SWARMING_USER", $securePassword)
           # bootstrapswarm does not forward bot arguments. Set the environment
           # variable used by --one-shot so the bot exits after one real task.
           [Environment]::SetEnvironmentVariable("SWARMING_BOT_ONE_SHOT", "1", [EnvironmentVariableTarget]::Machine)
           [Environment]::SetEnvironmentVariable("SWARMING_NEVER_REBOOT", "true", [EnvironmentVariableTarget]::Machine)
-          # -UseNewEnvironment asks Windows to construct the child environment
-          # from Machine scope and the swarming user's profile, avoiding
-          # inherited runneradmin profile paths such as APPDATA and USERPROFILE.
-          $process = Start-Process `
-            -FilePath (Join-Path $env:LUCI_TOOL_ROOT "bootstrapswarm.exe") `
-            -ArgumentList @("-hostname", $env:LUCI_BOT_HOSTNAME) `
-            -Credential $credential `
-            -LoadUserProfile `
-            -UseNewEnvironment `
-            -WorkingDirectory $env:SWARMING_WORKDIR `
-            -Wait `
-            -PassThru
-          exit $process.ExitCode
+          & $env:SWARMING_LAUNCHER -FilePath (Join-Path $env:LUCI_TOOL_ROOT "bootstrapswarm.exe") `
+            -ProcessArgs @("-hostname", $env:LUCI_BOT_HOSTNAME)
+          exit $LASTEXITCODE

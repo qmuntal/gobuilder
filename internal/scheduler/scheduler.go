@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/qmuntal/gobuilder/internal/githubactions"
 )
 
 type JobQueue interface {
 	JobsInQueue(ctx context.Context) (int, error)
+	BusyBots(ctx context.Context) (map[string]time.Time, error)
 }
 
 type WorkflowDispatcher interface {
@@ -27,13 +29,14 @@ const (
 )
 
 type Config struct {
-	Queue      JobQueue
-	Dispatcher WorkflowDispatcher
-	RunCounter WorkflowRunCounter
-	MaxJobs    int
-	Workflow   string
-	DryRun     bool
-	Output     io.Writer
+	Queue             JobQueue
+	Dispatcher        WorkflowDispatcher
+	RunCounter        WorkflowRunCounter
+	MaxJobs           int
+	Workflow          string
+	BotHostnamePrefix string
+	DryRun            bool
+	Output            io.Writer
 }
 
 type Result struct {
@@ -52,12 +55,14 @@ func Run(ctx context.Context, config Config) (Result, error) {
 		return Result{}, fmt.Errorf("max jobs must be %d or less", maxBotIndex)
 	}
 
-	queueDepth, err := config.Queue.JobsInQueue(ctx)
+	queueDepth, err := readQueueDepth(ctx, config.Queue)
 	if err != nil {
-		return Result{}, fmt.Errorf("query queue: %w", err)
+		return Result{}, err
 	}
-	if queueDepth < 0 {
-		return Result{}, fmt.Errorf("queue returned a negative job count")
+	result := Result{QueueDepth: queueDepth}
+	if queueDepth == 0 || config.MaxJobs == 0 {
+		writeStatus(config.Output, "queue_depth=%d max_jobs=%d dispatch_count=0\n", queueDepth, config.MaxJobs)
+		return result, nil
 	}
 
 	activeRuns := githubactions.ActiveWorkflowRuns{BotIndexes: map[int]int{}}
@@ -71,16 +76,35 @@ func Run(ctx context.Context, config Config) (Result, error) {
 		}
 	}
 
-	availableSlots := config.MaxJobs - activeRuns.Count
-	if availableSlots < 0 {
-		availableSlots = 0
+	availableSlots := max(0, config.MaxJobs-activeRuns.Count)
+	incoming := activeRuns.Count
+	// Only query started builds if knowing which bots are busy can change
+	// the decision. Missing task or attempt metadata is not evidence of work.
+	if availableSlots > 0 && activeRuns.UnknownCount == 0 && queueDepth-incoming < availableSlots && len(activeRuns.InProgressSince) > 0 {
+		bots, err := config.Queue.BusyBots(ctx)
+		if err != nil {
+			return result, fmt.Errorf("query busy LUCI bots: %w", err)
+		}
+		for slot, runStart := range activeRuns.InProgressSince {
+			buildStart, ok := bots[fmt.Sprintf("%s--%02d", config.BotHostnamePrefix, slot)]
+			if ok && !runStart.IsZero() && !buildStart.Before(runStart) {
+				incoming--
+			}
+		}
+		if incoming < activeRuns.Count {
+			// A bot may just have claimed the job from our first queue read.
+			queueDepth, err = readQueueDepth(ctx, config.Queue)
+			if err != nil {
+				return result, err
+			}
+			result.QueueDepth = queueDepth
+		}
 	}
 
-	dispatchBotIndexes := allocateBotIndexes(config.MaxJobs, availableSlots, queueDepth, activeRuns)
-	result := Result{QueueDepth: queueDepth, Dispatched: 0}
+	dispatchBotIndexes := allocateBotIndexes(config.MaxJobs, availableSlots, queueDepth-incoming, activeRuns)
 	dispatchCount := len(dispatchBotIndexes)
 
-	writeStatus(config.Output, "queue_depth=%d active_builder_runs=%d unknown_active_builder_runs=%d max_jobs=%d dispatch_count=%d\n", queueDepth, activeRuns.Count, activeRuns.UnknownCount, config.MaxJobs, dispatchCount)
+	writeStatus(config.Output, "queue_depth=%d active_builder_runs=%d assumed_incoming_runs=%d unknown_active_builder_runs=%d max_jobs=%d dispatch_count=%d\n", queueDepth, activeRuns.Count, incoming, activeRuns.UnknownCount, config.MaxJobs, dispatchCount)
 
 	if dispatchCount == 0 {
 		return result, nil
@@ -143,12 +167,23 @@ func Run(ctx context.Context, config Config) (Result, error) {
 	return result, nil
 }
 
-func allocateBotIndexes(maxJobs, availableSlots, queueDepth int, activeRuns githubactions.ActiveWorkflowRuns) []int {
-	if maxJobs <= 0 || availableSlots <= 0 || queueDepth <= 0 || activeRuns.UnknownCount > 0 {
+func readQueueDepth(ctx context.Context, queue JobQueue) (int, error) {
+	count, err := queue.JobsInQueue(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("query queue: %w", err)
+	}
+	if count < 0 {
+		return 0, fmt.Errorf("queue returned a negative job count")
+	}
+	return count, nil
+}
+
+func allocateBotIndexes(maxJobs, availableSlots, unmetDemand int, activeRuns githubactions.ActiveWorkflowRuns) []int {
+	if maxJobs <= 0 || availableSlots <= 0 || unmetDemand <= 0 || activeRuns.UnknownCount > 0 {
 		return nil
 	}
 
-	dispatchLimit := min(queueDepth, availableSlots)
+	dispatchLimit := min(unmetDemand, availableSlots)
 	botIndexes := make([]int, 0, dispatchLimit)
 	for botIndex := 1; botIndex <= maxJobs && len(botIndexes) < dispatchLimit; botIndex++ {
 		if activeRuns.BotIndexes[botIndex] > 0 {

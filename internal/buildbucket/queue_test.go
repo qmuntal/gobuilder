@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestQueueCountsMatchingScheduledBuildsAcrossPages(testingContext *testing.T) {
@@ -92,6 +93,47 @@ func TestQueueCountsAllBuildsWithoutBuilderFilter(testingContext *testing.T) {
 
 	if count := queue.countMatchingBuilds(builds); count != 2 {
 		testingContext.Fatalf("countMatchingBuilds() = %d, want 2", count)
+	}
+}
+
+func TestBusyBotsUsesActualBotAndLatestStartedBuild(testingContext *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var query searchBuildsRequest
+		if err := json.NewDecoder(r.Body).Decode(&query); err != nil {
+			testingContext.Error(err)
+		}
+		if query.Predicate.Status != "STARTED" || query.Predicate.Builder != (builderID{Project: "golang", Bucket: "ci"}) ||
+			query.Mask.Fields != "startTime,infra.swarming.botDimensions" {
+			testingContext.Errorf("unexpected running-build query: %+v", query)
+		}
+		switch query.PageToken {
+		case "":
+			_, _ = w.Write([]byte(`{"builds":[
+					{"startTime":"2026-01-01T10:00:00Z","infra":{"swarming":{"botDimensions":[{"key":"id","value":"fleet--01"}]}}},
+					{"startTime":"2026-01-01T10:05:00Z","infra":{"swarming":{"taskDimensions":[{"key":"id","value":"requested-only"}]}}}
+				],"nextPageToken":"next"}`))
+		case "next":
+			_, _ = w.Write([]byte(`{"builds":[
+					{"startTime":"2026-01-01T10:04:00Z","infra":{"swarming":{"botDimensions":[{"key":"os","value":"Windows"},{"key":"id","value":"fleet--01"}]}}}
+				]}`))
+		default:
+			http.Error(w, "unexpected page", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+	queue, err := NewQueue(QueueConfig{
+		BaseURL: server.URL, Project: "golang", Bucket: "ci", Builder: "specific-builder", HTTPClient: server.Client(),
+	})
+	if err != nil {
+		testingContext.Fatal(err)
+	}
+	bots, err := queue.BusyBots(context.Background())
+	if err != nil {
+		testingContext.Fatal(err)
+	}
+	want := time.Date(2026, 1, 1, 10, 4, 0, 0, time.UTC)
+	if len(bots) != 1 || !bots["fleet--01"].Equal(want) {
+		testingContext.Fatalf("busy bots = %v, want only fleet--01 started at %v", bots, want)
 	}
 }
 

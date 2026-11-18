@@ -15,7 +15,7 @@ import (
 
 const (
 	DefaultAPIURL          = "https://api.github.com"
-	maxWorkflowRunPages    = 100
+	maxWorkflowRunPages    = 10 // GitHub caps filtered searches at 1,000 results.
 	workflowRunPageSize    = 100
 	maxWorkflowRunAttempts = 3
 )
@@ -34,9 +34,10 @@ type DispatchRequest struct {
 }
 
 type ActiveWorkflowRuns struct {
-	Count        int
-	BotIndexes   map[int]int
-	UnknownCount int
+	Count           int
+	BotIndexes      map[int]int
+	UnknownCount    int
+	InProgressSince map[int]time.Time
 }
 
 func (dispatcher Dispatcher) ActiveWorkflowRuns(ctx context.Context, workflow string) (ActiveWorkflowRuns, error) {
@@ -47,36 +48,42 @@ func (dispatcher Dispatcher) ActiveWorkflowRuns(ctx context.Context, workflow st
 		return ActiveWorkflowRuns{}, fmt.Errorf("github token is required")
 	}
 
-	runs, err := dispatcher.workflowRuns(ctx, strings.TrimSpace(workflow))
-	if err != nil {
-		return ActiveWorkflowRuns{}, err
+	// Status queries are not an atomic snapshot. Look for in-progress runs
+	// last, then repeat to catch transitions back into an already-read state
+	// (e.g. a job returning to the queue after approval). Reserve the union.
+	statuses := [...]string{"requested", "waiting", "pending", "queued", "in_progress"}
+	seen := make(map[int64]workflowRun)
+	for range 2 {
+		for _, status := range statuses {
+			runs, err := dispatcher.workflowRuns(ctx, strings.TrimSpace(workflow), status)
+			if err != nil {
+				return ActiveWorkflowRuns{}, fmt.Errorf("list %s runs: %w", status, err)
+			}
+			for _, run := range runs.Runs {
+				switch run.Status {
+				case "completed":
+				case "requested", "waiting", "pending", "queued", "in_progress":
+					seen[run.ID] = run
+				default:
+					return ActiveWorkflowRuns{}, fmt.Errorf("github workflow run %d has unexpected status %q", run.ID, run.Status)
+				}
+			}
+		}
 	}
 
-	activeRuns := ActiveWorkflowRuns{BotIndexes: map[int]int{}}
-	seenRunIDs := map[int64]bool{}
-	for _, run := range runs.Runs {
-		if run.ID <= 0 {
-			return ActiveWorkflowRuns{}, fmt.Errorf("github workflow runs query returned invalid run ID %d", run.ID)
-		}
-		switch run.Status {
-		case "completed":
-			continue
-		case "requested", "queued", "in_progress", "waiting", "pending":
-		default:
-			return ActiveWorkflowRuns{}, fmt.Errorf("github workflow run %d has unexpected status %q", run.ID, run.Status)
-		}
-		if seenRunIDs[run.ID] {
-			continue
-		}
-		seenRunIDs[run.ID] = true
-		activeRuns.Count++
-
+	activeRuns := ActiveWorkflowRuns{
+		Count: len(seen), BotIndexes: make(map[int]int), InProgressSince: make(map[int]time.Time),
+	}
+	for _, run := range seen {
 		botIndex, ok := parseWorkflowRunBotIndex(run.DisplayTitle)
 		if !ok {
 			activeRuns.UnknownCount++
 			continue
 		}
 		activeRuns.BotIndexes[botIndex]++
+		if run.Status == "in_progress" && run.StartedAt.After(activeRuns.InProgressSince[botIndex]) {
+			activeRuns.InProgressSince[botIndex] = run.StartedAt
+		}
 	}
 	return activeRuns, nil
 }
@@ -87,12 +94,13 @@ type workflowRunsResponse struct {
 }
 
 type workflowRun struct {
-	ID           int64  `json:"id"`
-	DisplayTitle string `json:"display_title"`
-	Status       string `json:"status"`
+	ID           int64     `json:"id"`
+	DisplayTitle string    `json:"display_title"`
+	Status       string    `json:"status"`
+	StartedAt    time.Time `json:"run_started_at"`
 }
 
-func (dispatcher Dispatcher) workflowRuns(ctx context.Context, workflow string) (workflowRunsResponse, error) {
+func (dispatcher Dispatcher) workflowRuns(ctx context.Context, workflow, status string) (workflowRunsResponse, error) {
 	owner, repositoryName, err := splitRepository(dispatcher.Repository)
 	if err != nil {
 		return workflowRunsResponse{}, err
@@ -111,8 +119,10 @@ func (dispatcher Dispatcher) workflowRuns(ctx context.Context, workflow string) 
 		url.PathEscape(workflow),
 	)
 	var allRuns workflowRunsResponse
+	seen := make(map[int64]bool)
 	for page := 1; page <= maxWorkflowRunPages; page++ {
 		query := url.Values{}
+		query.Set("status", status)
 		query.Set("per_page", strconv.Itoa(workflowRunPageSize))
 		query.Set("page", strconv.Itoa(page))
 
@@ -124,7 +134,7 @@ func (dispatcher Dispatcher) workflowRuns(ctx context.Context, workflow string) 
 			return workflowRunsResponse{}, fmt.Errorf("github workflow runs query returned invalid total count %d", pageResponse.TotalCount)
 		}
 		if pageResponse.TotalCount > maxWorkflowRunPages*workflowRunPageSize {
-			return workflowRunsResponse{}, fmt.Errorf("github workflow run history exceeds %d runs", maxWorkflowRunPages*workflowRunPageSize)
+			return workflowRunsResponse{}, fmt.Errorf("github workflow runs query exceeds %d %s runs", maxWorkflowRunPages*workflowRunPageSize, status)
 		}
 		if pageResponse.TotalCount < allRuns.TotalCount {
 			return workflowRunsResponse{}, fmt.Errorf("github workflow run count decreased during pagination")
@@ -132,6 +142,15 @@ func (dispatcher Dispatcher) workflowRuns(ctx context.Context, workflow string) 
 		allRuns.TotalCount = pageResponse.TotalCount
 		if len(pageResponse.Runs) == 0 && len(allRuns.Runs) < allRuns.TotalCount {
 			return workflowRunsResponse{}, fmt.Errorf("github workflow runs query ended before all runs were listed")
+		}
+		for _, run := range pageResponse.Runs {
+			if run.ID <= 0 {
+				return workflowRunsResponse{}, fmt.Errorf("github workflow runs query returned invalid run ID %d", run.ID)
+			}
+			if seen[run.ID] {
+				return workflowRunsResponse{}, fmt.Errorf("github workflow run %d repeated during %s pagination", run.ID, status)
+			}
+			seen[run.ID] = true
 		}
 		allRuns.Runs = append(allRuns.Runs, pageResponse.Runs...)
 		if len(allRuns.Runs) >= allRuns.TotalCount {

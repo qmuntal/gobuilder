@@ -192,13 +192,13 @@ Residual risk: if a malicious artifact hash is committed to the workflow, the ch
 
 ### 7. `pywin32` is pinned without making the builder read repository files
 
-Decision: the uncredentialed cache workflow downloads `pywin32==$PYWIN32_VERSION` with `--only-binary=:all:`. The builder installs the same pin offline from the restored wheels using `--no-index`. `.github/requirements-builder-windows-arm64.txt` mirrors that pin only so Dependabot can discover updates. Neither Windows ARM64 workflow reads the requirements file. `verify-dependency-pins` runs on Dependabot pull requests and fails when either workflow's pin disagrees with the requirements.
+Decision: the uncredentialed cache workflow downloads `pywin32==$PYWIN32_VERSION` with `--only-binary=:all:`. The builder installs the same pin offline from the restored wheels using `--no-index`. `.github/requirements-builder-windows-arm64.txt` mirrors that pin only so Dependabot can discover updates. Neither Windows ARM64 workflow reads the requirements file. A separate read-only PR workflow checks that the mirrored pin, shared cache paths and exact key expressions agree on every relevant pull request.
 
 Rationale: `bootstrapswarm.exe` needs Python Windows integration. Pinning gives reproducible dependency selection, and wheel-only installation avoids arbitrary source build steps during the builder workflow. Dependabot understands requirements files, but the secret-bearing builder workflow should not check out the repository just to read a dependency pin. The sync check forces the workflow pin update to be an intentional reviewer-visible change.
 
 Security effect: avoids opportunistic upgrades, avoids running package build scripts from an sdist, and keeps dependency update discovery separate from the credentialed builder runtime.
 
-Residual risk: the workflow does not currently enforce a wheel hash for `pywin32`. The design trusts PyPI wheel distribution for the pinned version. The requirements file is metadata, not runtime configuration, and the sync check currently targets Dependabot PRs rather than every human-authored PR.
+Residual risk: the workflow does not currently enforce a wheel hash for `pywin32`. The design trusts PyPI wheel distribution for the pinned version. The requirements file is metadata, not runtime configuration.
 
 ### 8. LUCI private key material is short-lived on disk
 
@@ -308,14 +308,12 @@ Repository administrators should treat changes to workflows, pinned hashes, sche
 - LUCI services and downloaded LUCI bootstrap tools are trusted once their expected hashes are accepted into the repository.
 - The `swarming` user can create symbolic links and execute build payloads, and existing memberships are not removed; the account is not a privilege sandbox.
 - `pywin32` is not hash-pinned today; it is version-pinned and wheel-only.
-- Dependabot pin synchronization is enforced for Dependabot PRs, not every human-authored PR.
 - The 60-minute registration timeout bounds execution but is not an idle detector.
 
 ## Future Hardening Options
 
 These are not implemented today, but they are reasonable next steps if the threat model tightens:
 
-- Run the `pywin32` pin synchronization check for all pull requests that touch either pin.
 - Add hash checking for the exact `pywin32` wheel if the workflow can do so without requiring repository checkout in the builder job.
 - Add branch protection rules requiring the scheduler, builder, and dependency-pin checks before merging workflow changes.
 - Require reviewers for the `luci-builder-windows-arm64` GitHub environment.

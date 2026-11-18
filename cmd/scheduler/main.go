@@ -44,13 +44,14 @@ func run() error {
 	}
 
 	_, err = scheduler.Run(context.Background(), scheduler.Config{
-		Queue:      jobQueue,
-		Dispatcher: workflowDispatcher,
-		RunCounter: workflowDispatcher,
-		MaxJobs:    options.maxJobs,
-		Workflow:   options.workflow,
-		DryRun:     options.dryRun,
-		Output:     os.Stdout,
+		Queue:             jobQueue,
+		Dispatcher:        workflowDispatcher,
+		RunCounter:        workflowDispatcher,
+		MaxJobs:           options.maxJobs,
+		Workflow:          options.workflow,
+		BotHostnamePrefix: options.botHostnamePrefix,
+		DryRun:            options.dryRun,
+		Output:            os.Stdout,
 	})
 	return err
 }
@@ -63,6 +64,7 @@ type options struct {
 	repository             string
 	ref                    string
 	workflow               string
+	botHostnamePrefix      string
 	buildbucketURL         string
 	buildbucketProject     string
 	buildbucketBucket      string
@@ -87,6 +89,7 @@ func parseOptions(args []string) (options, error) {
 	flags.StringVar(&parsedOptions.repository, "repository", parsedOptions.repository, "repository in owner/name format")
 	flags.StringVar(&parsedOptions.ref, "ref", parsedOptions.ref, "git ref used for builder workflow dispatches")
 	flags.StringVar(&parsedOptions.workflow, "workflow", parsedOptions.workflow, "GitHub Actions workflow file or ID to dispatch")
+	flags.StringVar(&parsedOptions.botHostnamePrefix, "bot-hostname-prefix", "", "LUCI bot hostname before --NN (defaults to the Windows ARM64 fleet)")
 	flags.StringVar(&parsedOptions.buildbucketURL, "buildbucket-url", parsedOptions.buildbucketURL, "Buildbucket base URL")
 	flags.StringVar(&parsedOptions.buildbucketProject, "buildbucket-project", parsedOptions.buildbucketProject, "LUCI project to query")
 	flags.StringVar(&parsedOptions.buildbucketBucket, "buildbucket-bucket", parsedOptions.buildbucketBucket, "LUCI bucket to query")
@@ -101,6 +104,9 @@ func parseOptions(args []string) (options, error) {
 	}
 	if parsedOptions.workflow == "" {
 		return options{}, fmt.Errorf("workflow is required")
+	}
+	if parsedOptions.botHostnamePrefix == "" {
+		parsedOptions.botHostnamePrefix = "windows-arm64-azure-qmuntal"
 	}
 
 	return parsedOptions, nil

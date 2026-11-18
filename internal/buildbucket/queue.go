@@ -87,21 +87,50 @@ func normalizeBaseURL(rawBaseURL string) (string, error) {
 
 func (queue Queue) JobsInQueue(ctx context.Context) (int, error) {
 	queueDepth := 0
+	err := queue.visitBuildPages(ctx, "SCHEDULED", queue.builder, "id,builder", func(builds []searchBuild) {
+		queueDepth += queue.countMatchingBuilds(builds)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return queueDepth, nil
+}
+
+// BusyBots reports the newest currently started build on each actual Swarming
+// bot. A one-shot bot cannot serve new work even if its task is for a different
+// builder from the one selected by the queue filter.
+func (queue Queue) BusyBots(ctx context.Context) (map[string]time.Time, error) {
+	bots := make(map[string]time.Time)
+	err := queue.visitBuildPages(ctx, "STARTED", "", "startTime,infra.swarming.botDimensions", func(builds []searchBuild) {
+		for _, build := range builds {
+			for _, dim := range build.Infra.Swarming.BotDimensions {
+				if dim.Key == "id" && dim.Value != "" && build.StartTime.After(bots[dim.Value]) {
+					bots[dim.Value] = build.StartTime
+				}
+			}
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	return bots, nil
+}
+
+func (queue Queue) visitBuildPages(ctx context.Context, status, builder, fields string, visit func([]searchBuild)) error {
 	pageToken := ""
 	seenPageTokens := map[string]bool{}
 
 	for {
-		response, err := queue.searchScheduledBuilds(ctx, pageToken)
+		response, err := queue.searchBuilds(ctx, status, builder, fields, pageToken)
 		if err != nil {
-			return 0, err
+			return err
 		}
-
-		queueDepth += queue.countMatchingBuilds(response.Builds)
+		visit(response.Builds)
 		if response.NextPageToken == "" {
-			return queueDepth, nil
+			return nil
 		}
 		if seenPageTokens[response.NextPageToken] {
-			return 0, fmt.Errorf("buildbucket returned repeated page token %q", response.NextPageToken)
+			return fmt.Errorf("buildbucket returned repeated page token %q", response.NextPageToken)
 		}
 
 		seenPageTokens[response.NextPageToken] = true
@@ -123,21 +152,21 @@ func (queue Queue) countMatchingBuilds(builds []searchBuild) int {
 	return count
 }
 
-func (queue Queue) searchScheduledBuilds(ctx context.Context, pageToken string) (searchBuildsResponse, error) {
+func (queue Queue) searchBuilds(ctx context.Context, status, builder, fields, pageToken string) (searchBuildsResponse, error) {
 	requestBody, err := json.Marshal(searchBuildsRequest{
 		Predicate: buildPredicate{
 			Builder: builderID{
 				Project: queue.project,
 				Bucket:  queue.bucket,
-				Builder: queue.builder,
+				Builder: builder,
 			},
-			Status:              "SCHEDULED",
+			Status:              status,
 			IncludeExperimental: true,
 		},
 		PageSize:  defaultPageSize,
 		PageToken: pageToken,
 		Mask: buildMask{
-			Fields: "id,builder",
+			Fields: fields,
 		},
 	})
 	if err != nil {
@@ -220,6 +249,15 @@ type searchBuildsResponse struct {
 }
 
 type searchBuild struct {
-	ID      string    `json:"id"`
-	Builder builderID `json:"builder"`
+	ID        string    `json:"id"`
+	Builder   builderID `json:"builder"`
+	StartTime time.Time `json:"startTime"`
+	Infra     struct {
+		Swarming struct {
+			BotDimensions []struct {
+				Key   string `json:"key"`
+				Value string `json:"value"`
+			} `json:"botDimensions"`
+		} `json:"swarming"`
+	} `json:"infra"`
 }

@@ -96,8 +96,8 @@ func TestActiveWorkflowRunsRejectsUnsafeWorkflow(testingContext *testing.T) {
 	}
 }
 
-func TestActiveWorkflowRunsCountsActiveStatusesFromOneListing(testingContext *testing.T) {
-	var requestCount atomic.Int32
+func TestActiveWorkflowRunsCountsActiveStatuses(testingContext *testing.T) {
+	runStart := time.Unix(1000, 0).UTC()
 	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet {
 			testingContext.Fatalf("request method = %s, want GET", request.Method)
@@ -109,25 +109,28 @@ func TestActiveWorkflowRunsCountsActiveStatusesFromOneListing(testingContext *te
 			testingContext.Fatalf("Authorization header = %q", request.Header.Get("Authorization"))
 		}
 
-		requestCount.Add(1)
-		if request.URL.Query().Has("status") {
-			testingContext.Error("workflow runs request must not filter by status")
+		status := request.URL.Query().Get("status")
+		if status == "" {
+			testingContext.Error("unexpected full workflow history scan")
 		}
 		if request.URL.Query().Get("per_page") != "100" {
 			testingContext.Errorf("per_page = %q, want 100", request.URL.Query().Get("per_page"))
 		}
 		responseWriter.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(responseWriter).Encode(workflowRunsResponse{
-			TotalCount: 6,
-			Runs: []workflowRun{
-				{ID: 1, Status: "requested", DisplayTitle: "builder-windows-arm64 bot 01"},
-				{ID: 2, Status: "queued", DisplayTitle: "builder-windows-arm64 bot 02"},
-				{ID: 3, Status: "in_progress", DisplayTitle: "custom builder bot 03"},
-				{ID: 4, Status: "waiting", DisplayTitle: "builder-windows-arm64 bot 04"},
-				{ID: 5, Status: "pending", DisplayTitle: "builder-windows-arm64 bot 05"},
-				{ID: 6, Status: "completed", DisplayTitle: "legacy builder run"},
-			},
-		})
+		var matches []workflowRun
+		for _, run := range []workflowRun{
+			{ID: 1, Status: "requested", DisplayTitle: "builder-windows-arm64 bot 01"},
+			{ID: 2, Status: "queued", DisplayTitle: "builder-windows-arm64 bot 02"},
+			{ID: 3, Status: "in_progress", DisplayTitle: "custom builder bot 03", StartedAt: runStart},
+			{ID: 4, Status: "waiting", DisplayTitle: "builder-windows-arm64 bot 04"},
+			{ID: 5, Status: "pending", DisplayTitle: "builder-windows-arm64 bot 05"},
+			{ID: 6, Status: "completed", DisplayTitle: "legacy builder run"},
+		} {
+			if run.Status == status {
+				matches = append(matches, run)
+			}
+		}
+		_ = json.NewEncoder(responseWriter).Encode(workflowRunsResponse{TotalCount: len(matches), Runs: matches})
 	}))
 	defer server.Close()
 
@@ -153,8 +156,8 @@ func TestActiveWorkflowRunsCountsActiveStatusesFromOneListing(testingContext *te
 		}
 	}
 
-	if got := requestCount.Load(); got != 1 {
-		testingContext.Fatalf("request count = %d, want 1", got)
+	if len(activeRuns.InProgressSince) != 1 || !activeRuns.InProgressSince[3].Equal(runStart) {
+		testingContext.Fatalf("in-progress attempts = %v, want slot 03 only", activeRuns.InProgressSince)
 	}
 }
 
@@ -225,25 +228,14 @@ func TestActiveWorkflowRunsDeduplicatesRunIDs(testingContext *testing.T) {
 		testingContext.Run(testCase.name, func(testingContext *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
 				responseWriter.Header().Set("Content-Type", "application/json")
-				switch request.URL.Query().Get("page") {
-				case "1":
-					runs := make([]workflowRun, 100)
-					for runIndex := range runs {
-						runs[runIndex] = workflowRun{ID: int64(runIndex + 1), Status: "completed"}
-					}
-					runs[99] = workflowRun{ID: 100, Status: testCase.firstStatus, DisplayTitle: testCase.displayTitle}
-					_ = json.NewEncoder(responseWriter).Encode(workflowRunsResponse{TotalCount: 101, Runs: runs})
-				case "2":
-					_ = json.NewEncoder(responseWriter).Encode(workflowRunsResponse{
-						TotalCount: 102,
-						Runs: []workflowRun{
-							{ID: 100, Status: "in_progress", DisplayTitle: testCase.displayTitle},
-							{ID: 101, Status: "completed"},
-						},
-					})
-				default:
-					http.Error(responseWriter, "unexpected page", http.StatusBadRequest)
+				var runs []workflowRun
+				switch request.URL.Query().Get("status") {
+				case "queued":
+					runs = append(runs, workflowRun{ID: 100, Status: testCase.firstStatus, DisplayTitle: testCase.displayTitle})
+				case "in_progress":
+					runs = append(runs, workflowRun{ID: 100, Status: "in_progress", DisplayTitle: testCase.displayTitle})
 				}
+				_ = json.NewEncoder(responseWriter).Encode(workflowRunsResponse{TotalCount: len(runs), Runs: runs})
 			}))
 			defer server.Close()
 
@@ -316,7 +308,7 @@ func TestActiveWorkflowRunsRejectsUnknownStatuses(testingContext *testing.T) {
 	}
 }
 
-func TestActiveWorkflowRunsPaginatesGrowingHistory(testingContext *testing.T) {
+func TestWorkflowRunsPaginatesGrowingActiveStatus(testingContext *testing.T) {
 	var requestCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
 		requestCount.Add(1)
@@ -324,14 +316,16 @@ func TestActiveWorkflowRunsPaginatesGrowingHistory(testingContext *testing.T) {
 		response := workflowRunsResponse{TotalCount: 201}
 		switch request.URL.Query().Get("page") {
 		case "1", "2":
+			offset := 100
 			if request.URL.Query().Get("page") == "1" {
 				response.TotalCount = 101
+				offset = 0
 			}
 			for runID := 1; runID <= 100; runID++ {
-				response.Runs = append(response.Runs, workflowRun{ID: int64(runID), Status: "completed"})
+				response.Runs = append(response.Runs, workflowRun{ID: int64(offset + runID), Status: "waiting"})
 			}
 		case "3":
-			response.Runs = []workflowRun{{ID: 101, Status: "waiting", DisplayTitle: "builder-windows-arm64 bot 01"}}
+			response.Runs = []workflowRun{{ID: 201, Status: "waiting", DisplayTitle: "builder-windows-arm64 bot 01"}}
 		default:
 			http.Error(responseWriter, "unexpected page", http.StatusBadRequest)
 			return
@@ -346,12 +340,12 @@ func TestActiveWorkflowRunsPaginatesGrowingHistory(testingContext *testing.T) {
 		Repository: "owner/repo",
 		HTTPClient: server.Client(),
 	}
-	activeRuns, err := dispatcher.ActiveWorkflowRuns(context.Background(), "builder-windows-arm64.yml")
+	runs, err := dispatcher.workflowRuns(context.Background(), "builder-windows-arm64.yml", "waiting")
 	if err != nil {
 		testingContext.Fatalf("ActiveWorkflowRuns() error = %v", err)
 	}
-	if activeRuns.Count != 1 || activeRuns.UnknownCount != 0 || activeRuns.BotIndexes[1] != 1 {
-		testingContext.Fatalf("active runs = %+v, want the waiting run from the final page", activeRuns)
+	if len(runs.Runs) != 201 || runs.Runs[200].ID != 201 {
+		testingContext.Fatalf("expected all 201 waiting runs, got %d", len(runs.Runs))
 	}
 	if got := requestCount.Load(); got != 3 {
 		testingContext.Fatalf("request count = %d, want 3", got)
@@ -397,8 +391,8 @@ func TestActiveWorkflowRunsRejectsIncompleteHistory(testingContext *testing.T) {
 	}
 }
 
-func TestActiveWorkflowRunsHistoryLimit(testingContext *testing.T) {
-	for _, totalCount := range []int{10000, 10001} {
+func TestWorkflowRunsFilteredResultLimit(testingContext *testing.T) {
+	for _, totalCount := range []int{1000, 1001} {
 		testingContext.Run(strconv.Itoa(totalCount), func(testingContext *testing.T) {
 			var requestCount atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
@@ -410,7 +404,7 @@ func TestActiveWorkflowRunsHistoryLimit(testingContext *testing.T) {
 				}
 				response := workflowRunsResponse{TotalCount: totalCount}
 				for runIndex := 0; runIndex < 100; runIndex++ {
-					response.Runs = append(response.Runs, workflowRun{ID: int64((page-1)*100 + runIndex + 1), Status: "completed"})
+					response.Runs = append(response.Runs, workflowRun{ID: int64((page-1)*100 + runIndex + 1), Status: "queued"})
 				}
 				responseWriter.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(responseWriter).Encode(response)
@@ -423,10 +417,10 @@ func TestActiveWorkflowRunsHistoryLimit(testingContext *testing.T) {
 				Repository: "owner/repo",
 				HTTPClient: server.Client(),
 			}
-			activeRuns, err := dispatcher.ActiveWorkflowRuns(context.Background(), "builder-windows-arm64.yml")
-			if totalCount == 10001 {
-				if err == nil || !strings.Contains(err.Error(), "history exceeds 10000 runs") {
-					testingContext.Fatalf("ActiveWorkflowRuns() error = %v, want history limit error", err)
+			runs, err := dispatcher.workflowRuns(context.Background(), "builder-windows-arm64.yml", "queued")
+			if totalCount == 1001 {
+				if err == nil || !strings.Contains(err.Error(), "exceeds 1000 queued runs") {
+					testingContext.Fatalf("workflowRuns() error = %v, want filtered listing limit error", err)
 				}
 				if got := requestCount.Load(); got != 1 {
 					testingContext.Fatalf("request count = %d, want immediate rejection after one page", got)
@@ -436,11 +430,11 @@ func TestActiveWorkflowRunsHistoryLimit(testingContext *testing.T) {
 			if err != nil {
 				testingContext.Fatalf("ActiveWorkflowRuns() error = %v", err)
 			}
-			if activeRuns.Count != 0 || activeRuns.UnknownCount != 0 {
-				testingContext.Fatalf("active runs = %+v, want no active runs in completed history", activeRuns)
+			if len(runs.Runs) != 1000 {
+				testingContext.Fatalf("got %d queued runs, want 1000", len(runs.Runs))
 			}
-			if got := requestCount.Load(); got != 100 {
-				testingContext.Fatalf("request count = %d, want 100", got)
+			if got := requestCount.Load(); got != 10 {
+				testingContext.Fatalf("request count = %d, want 10", got)
 			}
 		})
 	}

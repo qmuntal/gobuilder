@@ -7,7 +7,7 @@ This repository has the following workflows:
 - `scheduler` is declared with a 5-minute cron and can also be started manually. It runs the Go scheduler in `cmd/scheduler`. GitHub may delay or throttle scheduled workflows.
 - `builder-windows-arm64` is started by the scheduler and starts a LUCI Swarming bot.
 - `cache-windows-arm64` populates the compiler and Python-wheel caches without using the LUCI environment.
-- `verify-dependency-pins` checks that dependency pins and cache paths stay synchronized on Dependabot pull requests.
+- `verify-dependency-pins` checks dependency pins, cache paths, and exact reader/writer key expressions on every PR that changes the relevant files.
 
 The `builder-windows-arm64` and `cache-windows-arm64` workflows declare `permissions: {}` so the default `GITHUB_TOKEN` has no repository permissions. Only the builder uses the `luci-builder-windows-arm64` environment. The `scheduler` workflow grants `contents: read` to check out the Go source and `actions: write` to dispatch the builder workflow in the same repository with the built-in token.
 
@@ -17,6 +17,7 @@ The scheduler counts queued Go LUCI builds by querying Buildbucket, the backend 
 
 - `--max-jobs`: maximum active builder workflow slots, default `5`
 - `--workflow`: required GitHub Actions workflow file or ID to dispatch
+- `--bot-hostname-prefix`: base LUCI hostname before `--NN`, default `windows-arm64-azure-qmuntal`. Set the `bot_hostname_prefix` workflow input when targeting a different fleet.
 - `--buildbucket-project`: LUCI project to query, default `golang`
 - `--buildbucket-bucket`: LUCI bucket to query, default `ci`
 - `--buildbucket-builder-name`: optional builder-name substring to count; empty counts all builders
@@ -25,7 +26,9 @@ The scheduler workflow defaults to dispatching `builder-windows-arm64.yml`. Its 
 
 Before dispatching, the scheduler counts active `builder-windows-arm64` workflow runs in GitHub Actions and reads their stable `bot_index` slots from the workflow run name. It starts only the remaining capacity up to `--max-jobs` and passes each new workflow the first free two-digit slot. The builder workflow uses that index as the suffix of the LUCI composite bot ID, keeping the bot pages stable in the LUCI UI while still allowing multiple concurrent slots. If an active workflow run does not expose a parseable slot, the scheduler dispatches no new builders rather than risk reusing an occupied bot ID.
 
-The scheduler reads one unfiltered, paginated workflow-run listing and counts active statuses locally, deduplicating by GitHub run ID across pages. Slots are read from the ` bot NN` suffix of the run name, independently of whether `--workflow` is a filename or a numeric ID. History scans are limited to 100 pages of 100 runs; if the full history cannot be read within that bound, scheduling fails without dispatching builders.
+An empty LUCI queue skips the GitHub lookup entirely. Otherwise, when capacity is enabled, the scheduler queries only active GitHub statuses, with no age cutoff. Two passes reserve the union of run IDs so a status transition or old pending approval need not appear on the newest page to be counted. Incomplete listings fail closed; completed workflow history does not limit scheduling.
+
+A waiting or bootstrapping bot already covers one queued build. A one-shot bot serving a task does not. When this distinction changes the dispatch decision, the scheduler matches `STARTED` Buildbucket builds to in-progress runs by exact bot ID and start time, then refreshes the queue if it found a busy bot. Missing task evidence is treated as incoming capacity, not as permission to dispatch another bot.
 
 Each workflow-listing page retries HTTP 502, 503, and 504 responses at most twice, waiting 1 second and then 2 seconds. Cancellation interrupts these waits. Other errors and workflow-dispatch requests are not retried; a failed listing still prevents all dispatches.
 
@@ -47,7 +50,7 @@ The `builder-windows-arm64` workflow follows the Go dashboard builder setup by m
 
 The `builder-windows-arm64` workflow runs on a Windows ARM64 runner. It downloads `luci_machine_tokend.exe` and `bootstrapswarm.exe` from `go-builder-data`, matching the Azure Windows ARM64 setup in `golang/build`. The Swarming bot handles CIPD-managed payloads after it starts.
 
-The runner must provide `python3.exe` on `PATH`. The workflow checks this before provisioning because the pinned bootstrap executable launches Python by that name; `python.exe` alone is not sufficient.
+The runner must provide `python3.exe` on `PATH`; `python.exe` alone is not sufficient. Before minting a token, the builder uses the same clean `swarming` login and working directory as the bot to check that Python imports `win32security`, GCC targets ARM64, and `C:\b` is writable. Known incompatible AMD64 tools from Strawberry Perl and Git for Windows are removed; native ARM64 copies are preserved.
 
 The workflow grants the local `swarming` user `SeCreateSymbolicLinkPrivilege` for symbolic links instead of adding it to Administrators.
 
