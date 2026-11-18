@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -107,6 +108,7 @@ func (dispatcher Dispatcher) collectStatusRuns(ctx context.Context, workflow, st
 type workflowRunsResponse struct {
 	TotalCount int           `json:"total_count"`
 	Runs       []workflowRun `json:"workflow_runs"`
+	hasNext    bool
 }
 
 type workflowRun struct {
@@ -171,11 +173,16 @@ func (dispatcher Dispatcher) workflowRuns(ctx context.Context, workflow, status 
 		if repeatedID != 0 {
 			return allRuns, fmt.Errorf("%w: run %d repeated on page %d", errUnstableRunListing, repeatedID, page)
 		}
-		if len(allRuns.Runs) >= allRuns.TotalCount {
-			return allRuns, nil
-		}
-		if len(pageResponse.Runs) == 0 {
+		if len(pageResponse.Runs) == 0 && (pageResponse.hasNext || (page > 1 && allRuns.TotalCount > (page-1)*workflowRunPageSize)) {
 			return allRuns, fmt.Errorf("%w: ended before all runs were listed (page %d, listed %d, total_count %d)", errUnstableRunListing, page, len(allRuns.Runs), allRuns.TotalCount)
+		}
+		// Filtered total_count can lag status transitions. A few missing
+		// rows on the terminal page do not imply another page exists.
+		if !pageResponse.hasNext {
+			if allRuns.TotalCount > page*workflowRunPageSize {
+				return allRuns, fmt.Errorf("%w: missing next link on page %d with total_count %d", errUnstableRunListing, page, allRuns.TotalCount)
+			}
+			return allRuns, nil
 		}
 	}
 	return workflowRunsResponse{}, fmt.Errorf("github workflow runs query exceeded %d pages", maxWorkflowRunPages)
@@ -224,11 +231,36 @@ func (dispatcher Dispatcher) workflowRunsPage(ctx context.Context, requestURL st
 		return workflowRunsResponse{}, fmt.Errorf("github workflow runs query failed with status %d", httpResponse.StatusCode)
 	}
 
-	var payload workflowRunsResponse
+	payload := workflowRunsResponse{TotalCount: -1}
 	if err := json.NewDecoder(httpResponse.Body).Decode(&payload); err != nil {
 		return workflowRunsResponse{}, fmt.Errorf("decode workflow runs response: %w", err)
 	}
+	if payload.Runs == nil {
+		return workflowRunsResponse{}, fmt.Errorf("github workflow runs response is missing the workflow_runs array")
+	}
+	payload.hasNext = hasNextPage(httpResponse.Header)
 	return payload, nil
+}
+
+// Only use the relation. Construct numbered page URLs on the configured API
+// endpoint rather than sending the GitHub token to a URL from a response.
+func hasNextPage(header http.Header) bool {
+	for _, line := range header.Values("Link") {
+		for link := range strings.SplitSeq(line, ",") {
+			_, params, ok := strings.Cut(link, ">")
+			if !ok {
+				continue
+			}
+			for param := range strings.SplitSeq(params, ";") {
+				name, value, ok := strings.Cut(param, "=")
+				if ok && strings.EqualFold(strings.TrimSpace(name), "rel") &&
+					slices.Contains(strings.Fields(strings.Trim(strings.TrimSpace(value), `"`)), "next") {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func waitForWorkflowRunRetry(ctx context.Context, attempt int) error {

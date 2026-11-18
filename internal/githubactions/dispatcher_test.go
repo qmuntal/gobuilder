@@ -117,7 +117,7 @@ func TestActiveWorkflowRunsCountsActiveStatuses(testingContext *testing.T) {
 			testingContext.Errorf("per_page = %q, want 100", request.URL.Query().Get("per_page"))
 		}
 		responseWriter.Header().Set("Content-Type", "application/json")
-		var matches []workflowRun
+		matches := []workflowRun{}
 		for _, run := range []workflowRun{
 			{ID: 1, Status: "requested", DisplayTitle: "builder-windows-arm64 bot 01"},
 			{ID: 2, Status: "queued", DisplayTitle: "builder-windows-arm64 bot 02"},
@@ -228,7 +228,7 @@ func TestActiveWorkflowRunsDeduplicatesRunIDs(testingContext *testing.T) {
 		testingContext.Run(testCase.name, func(testingContext *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
 				responseWriter.Header().Set("Content-Type", "application/json")
-				var runs []workflowRun
+				runs := []workflowRun{}
 				switch request.URL.Query().Get("status") {
 				case "queued":
 					runs = append(runs, workflowRun{ID: 100, Status: testCase.firstStatus, DisplayTitle: testCase.displayTitle})
@@ -320,6 +320,9 @@ func TestWorkflowRunsPaginatesGrowingActiveStatus(testingContext *testing.T) {
 			if request.URL.Query().Get("page") == "1" {
 				response.TotalCount = 101
 				offset = 0
+				responseWriter.Header().Set("Link", `<?page=2>; rel="next"`)
+			} else {
+				responseWriter.Header().Set("Link", `<?page=3>; rel="next"`)
 			}
 			for runID := 1; runID <= 100; runID++ {
 				response.Runs = append(response.Runs, workflowRun{ID: int64(offset + runID), Status: "waiting"})
@@ -352,37 +355,54 @@ func TestWorkflowRunsPaginatesGrowingActiveStatus(testingContext *testing.T) {
 	}
 }
 
-func TestActiveWorkflowRunsRechecksIncompleteStatus(t *testing.T) {
+func TestActiveWorkflowRunsUsesGitHubPagination(t *testing.T) {
+	type page struct {
+		body string
+		link string
+	}
+	const next = `<?page=2>; rel="next", <?page=2>; rel="last"`
+	const prev = `<?page=1>; rel="prev"`
 	const empty = `{"total_count":0,"workflow_runs":[]}`
 	const stale = `{"total_count":1,"workflow_runs":[]}`
 	const partial = `{"total_count":2,"workflow_runs":[{"id":41,"status":"in_progress","display_title":"builder bot 01"}]}`
 	const complete = `{"total_count":1,"workflow_runs":[{"id":42,"status":"in_progress","display_title":"builder bot 02"}]}`
+	const twoActive = `{"total_count":4,"workflow_runs":[{"id":41,"status":"in_progress","display_title":"builder bot 01"},{"id":42,"status":"in_progress","display_title":"builder bot 02"}]}`
+	const staleTail = `{"total_count":4,"workflow_runs":[]}`
 	for _, tc := range []struct {
 		name      string
-		responses []string
+		responses []page
 		wantPages []string
 		wantSlots []int
 		wantErr   bool
 	}{
-		{"stale count clears", []string{stale, empty, empty}, []string{"1", "1", "1"}, nil, false},
-		{"keep slots seen before restart", []string{partial, `{"total_count":2,"workflow_runs":[]}`, complete, complete}, []string{"1", "2", "1", "1"}, []int{1, 2}, false},
-		{"shrinking count", []string{partial, empty, complete, complete}, []string{"1", "2", "1", "1"}, []int{1, 2}, false},
-		{"overlapping pages", []string{partial, partial, complete, complete}, []string{"1", "2", "1", "1"}, []int{1, 2}, false},
-		{"still incomplete", []string{stale, stale, stale}, []string{"1", "1", "1"}, nil, true},
+		{"four reported but only two returned", []page{{twoActive, ""}, {twoActive, ""}}, []string{"1", "1"}, []int{1, 2}, false},
+		{"stale count on empty terminal page", []page{{twoActive, next}, {staleTail, prev}, {twoActive, next}, {staleTail, prev}}, []string{"1", "2", "1", "2"}, []int{1, 2}, false},
+		{"next link even when total already reached", []page{{complete, next}, {partial, prev}, {complete, next}, {partial, prev}}, []string{"1", "2", "1", "2"}, []int{1, 2}, false},
+		{"no active rows", []page{{stale, ""}, {stale, ""}}, []string{"1", "1"}, nil, false},
+		{"keep slots seen before restart", []page{{partial, next}, {staleTail, `<?page=3>; rel="next"`}, {complete, ""}, {complete, ""}}, []string{"1", "2", "1", "1"}, []int{1, 2}, false},
+		{"shrinking count", []page{{partial, next}, {empty, prev}, {complete, ""}, {complete, ""}}, []string{"1", "2", "1", "1"}, []int{1, 2}, false},
+		{"overlapping pages", []page{{partial, next}, {partial, prev}, {complete, ""}, {complete, ""}}, []string{"1", "2", "1", "1"}, []int{1, 2}, false},
+		{"still incomplete", []page{{stale, next}, {stale, next}, {stale, next}}, []string{"1", "1", "1"}, nil, true},
+		{"missing array is not an empty page", []page{{`{"total_count":4}`, ""}}, []string{"1"}, nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				var pages []string
 				transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					header := make(http.Header)
 					body := empty
 					if r.URL.Query().Get("status") == "in_progress" {
 						pages = append(pages, r.URL.Query().Get("page"))
 						if len(pages) > len(tc.responses) {
 							return nil, errors.New("unexpected additional listing")
 						}
-						body = tc.responses[len(pages)-1]
+						response := tc.responses[len(pages)-1]
+						body = response.body
+						if response.link != "" {
+							header.Set("Link", response.link)
+						}
 					}
-					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
+					return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(strings.NewReader(body))}, nil
 				})
 				d := Dispatcher{Token: "token", Repository: "owner/repo", HTTPClient: &http.Client{Transport: transport}}
 				runs, err := d.ActiveWorkflowRuns(context.Background(), "builder.yml")
@@ -408,16 +428,21 @@ func TestWorkflowRunsRejectsIncompleteListing(testingContext *testing.T) {
 		firstCount int
 		nextCount  int
 		wantError  string
+		noNextLink bool
 	}{
 		{name: "empty page", firstCount: 101, nextCount: 101, wantError: "ended before all runs"},
 		{name: "shrinking history", firstCount: 101, nextCount: 100, wantError: "count decreased"},
 		{name: "invalid total count", firstCount: 99, wantError: "invalid total count"},
+		{name: "missing next link for a whole page", firstCount: 101, noNextLink: true, wantError: "missing next link"},
 	} {
 		testingContext.Run(testCase.name, func(testingContext *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
 				responseWriter.Header().Set("Content-Type", "application/json")
-				response := workflowRunsResponse{TotalCount: testCase.nextCount}
+				response := workflowRunsResponse{TotalCount: testCase.nextCount, Runs: []workflowRun{}}
 				if request.URL.Query().Get("page") == "1" {
+					if !testCase.noNextLink {
+						responseWriter.Header().Set("Link", `<?page=2>; rel="next"`)
+					}
 					response.TotalCount = testCase.firstCount
 					for runID := 1; runID <= 100; runID++ {
 						response.Runs = append(response.Runs, workflowRun{ID: int64(runID), Status: "completed"})
@@ -453,6 +478,9 @@ func TestWorkflowRunsFilteredResultLimit(testingContext *testing.T) {
 					return
 				}
 				response := workflowRunsResponse{TotalCount: totalCount}
+				if page*workflowRunPageSize < totalCount {
+					responseWriter.Header().Set("Link", `<?page=`+strconv.Itoa(page+1)+`>; rel="next"`)
+				}
 				for runIndex := 0; runIndex < 100; runIndex++ {
 					response.Runs = append(response.Runs, workflowRun{ID: int64((page-1)*100 + runIndex + 1), Status: "queued"})
 				}

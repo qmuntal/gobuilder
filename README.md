@@ -30,7 +30,9 @@ An empty LUCI queue skips the GitHub lookup entirely. Otherwise, when capacity i
 
 A waiting or bootstrapping bot already covers one queued build. A one-shot bot serving a task does not. When this distinction changes the dispatch decision, the scheduler matches `STARTED` Buildbucket builds to in-progress runs by exact bot ID and start time, then refreshes the queue if it found a busy bot. Missing task evidence is treated as incoming capacity, not as permission to dispatch another bot.
 
-Each workflow-listing page retries HTTP 502, 503, and 504 responses at most twice. If a status listing ends before its reported `total_count`, the count shrinks, or pages overlap, the scheduler restarts **that status** from page one at most twice, retaining any occupied slots already seen. Both retry policies wait 1 second and then 2 seconds and honor cancellation. A persistently incomplete listing prevents all dispatches; dispatch requests themselves are never retried.
+The scheduler requests another page only when GitHub sends a `Link` with `rel="next"`. A terminal page can return two active runs while `total_count` still says four; the scheduler reserves the two observed slots rather than requesting a nonexistent page. If a whole page appears to be missing, the count shrinks between pages, or pages overlap, it restarts that status from page one and retains the slots already seen.
+
+Both listing restarts and per-page HTTP 502, 503, and 504 retries are limited to two, with cancellable waits of 1 second and then 2 seconds. A persistently incomplete listing prevents all dispatches; dispatch requests themselves are never retried.
 
 Manual `builder-windows-arm64` workflow dispatches default to slot `99`; scheduler-dispatched runs use the first free slot in the configured active range. Slot inputs must be exactly two ASCII digits from `01` to `99`, with no surrounding whitespace.
 

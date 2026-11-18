@@ -209,7 +209,7 @@ Result: the longest builder phase is `Register LUCI builder`, currently limited 
 
 ### Pagination And Response Bounds
 
-Decision: each GitHub active-status query is capped at the filtered API limit of 1,000 results (10 pages of 100). A status exceeding that limit fails immediately. Shrinking counts, overlapping pages, and an empty page before the reported total trigger a bounded reread; if the listing is still inconsistent, the tick fails without dispatch. There is no limit on completed history. Buildbucket responses are size-limited, and repeated page tokens are rejected for both queue and busy-bot queries.
+Decision: each GitHub active-status query follows the `rel="next"` signal for numbered pages and is capped at the filtered API limit of 1,000 results (10 pages of 100). A short terminal page is valid even when `total_count` is stale within that page's range. An advertised continuation is read even if the reported total has already been reached. If a whole page implied by the count is missing, a nonterminal page is empty, the count shrinks between pages, or pages overlap, the scheduler retries the listing and fails closed if it remains inconsistent. There is no limit on completed history. Buildbucket responses are size-limited, and repeated page tokens are rejected for both queue and busy-bot queries.
 
 Rationale: API clients should have explicit bounds even when services behave unexpectedly.
 
